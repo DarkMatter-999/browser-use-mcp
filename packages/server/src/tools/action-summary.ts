@@ -1,4 +1,5 @@
 import type { DownloadInfo, JsonValue } from "@browser-use/protocol";
+import { chooserWatch } from "../files/chooser-watch";
 import type { ToolContext } from "../mcp/context";
 
 export interface ActionMarker {
@@ -25,10 +26,12 @@ export async function finishAction(
   const downloads = (await ctx.listDownloads().catch((): DownloadInfo[] => [])).filter(
     (download) => download.sequence > marker.downloadSequence,
   );
+  const chooser = chooserWatch.peek(ctx, tabId);
   return {
     ...base,
     ...(tab ? { page: { url: tab.url, title: tab.title } } : {}),
     ...(tab?.pendingDialog ? { dialog: tab.pendingDialog as unknown as JsonValue } : {}),
+    ...(chooser ? { fileChooser: { open: true, multiple: chooser.multiple } } : {}),
     ...(downloads.length ? { downloads: downloads as unknown as JsonValue } : {}),
   };
 }

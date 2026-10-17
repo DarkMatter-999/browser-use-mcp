@@ -1,4 +1,4 @@
-import { BrowserUseError, type JsonValue } from "@browser-use/protocol";
+import { BrowserUseError, type DownloadInfo, type JsonValue } from "@browser-use/protocol";
 import { z } from "zod";
 import type { ToolContext } from "../mcp/context";
 import { defineTool } from "../mcp/define-tool";
@@ -9,11 +9,13 @@ const LOAD_STATES = ["load", "domcontentloaded", "interactive", "complete"];
 
 const inputShape = {
   tabId: tabIdField.describe("Tab id from browser_tabs"),
-  condition: z.enum(["loadState", "url", "title", "selector", "delayMs"]),
+  condition: z.enum(["loadState", "url", "title", "selector", "delayMs", "download"]),
   value: z
     .string()
     .optional()
-    .describe("Load state, exact URL, exact title or CSS selector, depending on condition"),
+    .describe(
+      "Load state, exact URL, exact title or CSS selector, depending on condition; for download an optional filename substring",
+    ),
   delayMs: z.number().int().nonnegative().max(30_000).optional(),
   timeoutMs: z.number().int().positive().max(120_000).optional().default(10_000),
 };
@@ -23,6 +25,7 @@ export interface WaitOutcome {
   tabId: number;
   condition: string;
   satisfied: true;
+  download?: DownloadInfo;
 }
 
 function evalValue(result: JsonValue): JsonValue | undefined {
@@ -50,7 +53,13 @@ export async function waitFor(
   }
   requireTab(ctx, args.tabId);
   const start = Date.now();
-  const deadline = start + args.timeoutMs;
+  const timeoutMs =
+    args.condition === "download" && input.timeoutMs === undefined ? 30_000 : args.timeoutMs;
+  const deadline = start + timeoutMs;
+  let baseline = 0;
+  if (args.condition === "download") {
+    baseline = Math.max(0, ...(await ctx.listDownloads()).map((d) => d.sequence));
+  }
   let eventSeen = false as boolean;
   const unsubscribe = ctx.subscribe(args.tabId, (method) => {
     if (
@@ -70,6 +79,31 @@ export async function waitFor(
         throw new BrowserUseError("TAB_NOT_CONNECTED", `Tab ${args.tabId} detached while waiting`);
       }
       let satisfied = false;
+      if (args.condition === "download") {
+        const needle = args.value ?? "";
+        const match = (await ctx.listDownloads())
+          .filter((d) => d.sequence > baseline && d.filename.includes(needle))
+          .sort((a, b) => a.sequence - b.sequence)
+          .find((d) => d.state !== "in_progress");
+        if (match?.state === "interrupted") {
+          throw new BrowserUseError(
+            "INTERNAL",
+            `Download interrupted: ${match.error ?? "unknown error"}`,
+          );
+        }
+        if (match) {
+          return {
+            tabId: args.tabId,
+            condition: args.condition,
+            satisfied: true,
+            download: match,
+          };
+        }
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(250, Math.max(1, deadline - Date.now()))),
+        );
+        continue;
+      }
       if (args.condition === "delayMs") {
         satisfied = Date.now() >= start + (args.delayMs ?? 0);
       } else if (args.condition === "loadState") {
@@ -121,7 +155,8 @@ export const waitTools = [
   defineTool({
     name: "browser_wait",
     title: "Wait",
-    description: "Wait for a connected tab's load state, URL, title, selector, or a bounded delay.",
+    description:
+      "Wait for a connected tab's load state, URL, title, selector, a bounded delay, or a new download to finish (condition download, value = optional filename substring, default timeout 30s).",
     inputShape,
     handler: async (ctx, args) => jsonResult(await waitFor(ctx, args)),
   }),

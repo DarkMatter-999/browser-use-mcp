@@ -1,5 +1,6 @@
 import { BrowserUseError, type JsonValue } from "@browser-use/protocol";
 import { z } from "zod";
+import { chooserWatch } from "../files/chooser-watch";
 import type { ToolContext } from "../mcp/context";
 import { defineTool } from "../mcp/define-tool";
 import { jsonResult } from "../mcp/format";
@@ -108,6 +109,7 @@ export async function browserClick(ctx: ToolContext, input: z.input<typeof targe
   const args = targetSchema.parse(input);
   return acting(ctx, args.tabId, async () => {
     const target = await resolveTarget(ctx, args.tabId, args);
+    await chooserWatch.armFor(ctx, args.tabId).catch(() => undefined);
     await pointTo(ctx, target, `Click ${target.description}`);
     await mouse(ctx, args.tabId, "mousePressed", target.x, target.y);
     await mouse(ctx, args.tabId, "mouseReleased", target.x, target.y);
@@ -219,6 +221,7 @@ export async function browserPressKey(ctx: ToolContext, input: z.input<typeof ke
   return acting(ctx, args.tabId, async () => {
     requireTab(ctx, args.tabId);
     const mask = args.modifiers.reduce((value, name) => value | MODIFIER_MASK[name], 0);
+    await chooserWatch.armFor(ctx, args.tabId).catch(() => undefined);
     await ctx.sendCommand(args.tabId, "Input.dispatchKeyEvent", {
       type: "keyDown",
       key: args.key,

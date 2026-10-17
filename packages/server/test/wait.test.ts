@@ -1,6 +1,7 @@
+import type { DownloadInfo } from "@browser-use/protocol";
 import { describe, expect, it, vi } from "vitest";
 import { waitFor, waitTools } from "../src/tools/wait";
-import { scriptedContext } from "./helpers/context";
+import { makeContext, scriptedContext } from "./helpers/context";
 import { findTool, parseText } from "./helpers/tool";
 
 const tab = [{ tabId: 1, url: "https://a/", title: "A" }];
@@ -143,5 +144,87 @@ describe("wait tool", () => {
     });
     expect(out.isError).toBe(true);
     expect(parseText(out)).toMatchObject({ error: { code: "TAB_NOT_CONNECTED" } });
+  });
+});
+
+describe("browser_wait download", () => {
+  it("waits for a new download to complete", async () => {
+    vi.useFakeTimers();
+    let list: DownloadInfo[] = [
+      {
+        downloadId: 1,
+        filename: "/old",
+        url: "u",
+        state: "complete" as const,
+        bytesReceived: 1,
+        totalBytes: 1,
+        sequence: 1,
+      },
+    ];
+    const ctx = makeContext({ listTabs: () => tab, listDownloads: () => Promise.resolve(list) });
+    const waiting = waitFor(ctx, { tabId: 1, condition: "download", value: "report" });
+    list = [
+      ...list,
+      {
+        downloadId: 2,
+        filename: "/tmp/report.pdf",
+        url: "u",
+        state: "in_progress" as const,
+        bytesReceived: 0,
+        totalBytes: 9,
+        sequence: 2,
+      },
+    ];
+    await vi.advanceTimersByTimeAsync(300);
+    list = [
+      {
+        downloadId: 2,
+        filename: "/tmp/report.pdf",
+        url: "u",
+        state: "complete",
+        bytesReceived: 9,
+        totalBytes: 9,
+        sequence: 3,
+      },
+    ];
+    await vi.advanceTimersByTimeAsync(300);
+    await expect(waiting).resolves.toMatchObject({
+      tabId: 1,
+      condition: "download",
+      satisfied: true,
+      download: { filename: "/tmp/report.pdf", state: "complete" },
+    });
+    vi.useRealTimers();
+  });
+
+  it("fails when the awaited download is interrupted and times out otherwise", async () => {
+    vi.useFakeTimers();
+    let list: DownloadInfo[] = [];
+    const ctx = makeContext({ listTabs: () => tab, listDownloads: () => Promise.resolve(list) });
+    const failing = waitFor(ctx, { tabId: 1, condition: "download" });
+    const failed = expect(failing).rejects.toMatchObject({
+      code: "INTERNAL",
+      message: expect.stringContaining("NETWORK_FAILED") as string,
+    });
+    list = [
+      {
+        downloadId: 5,
+        filename: "",
+        url: "u",
+        state: "interrupted",
+        bytesReceived: 0,
+        totalBytes: 9,
+        sequence: 5,
+        error: "NETWORK_FAILED",
+      },
+    ];
+    await vi.advanceTimersByTimeAsync(300);
+    await failed;
+    list = [];
+    const timing = waitFor(ctx, { tabId: 1, condition: "download", timeoutMs: 500 });
+    const timedOut = expect(timing).rejects.toMatchObject({ code: "TIMEOUT" });
+    await vi.advanceTimersByTimeAsync(600);
+    await timedOut;
+    vi.useRealTimers();
   });
 });
