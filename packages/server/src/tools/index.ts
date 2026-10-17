@@ -1,5 +1,6 @@
 import type { AnyTool } from "../mcp/define-tool";
 import { evaluateTools } from "./evaluate";
+import { interactionTools } from "./interaction";
 import { navigationTools } from "./navigation";
 import { screenshotTools } from "./screenshot";
 import { snapshotTools } from "./snapshot";
@@ -13,4 +14,5 @@ export const allTools: readonly AnyTool[] = [
   ...waitTools,
   ...screenshotTools,
   ...snapshotTools,
+  ...interactionTools,
 ];
