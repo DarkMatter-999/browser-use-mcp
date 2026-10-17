@@ -11,12 +11,26 @@ const requestId = z.uuid();
 const tabId = z.number().int().positive();
 const cdpMethod = z.string().min(1).max(128);
 
+export const pendingDialogSchema = z.object({
+  type: z.enum(["alert", "confirm", "prompt", "beforeunload"]),
+  message: z.string(),
+  url: z.string(),
+  defaultPrompt: z.string().optional(),
+});
+export type PendingDialog = z.infer<typeof pendingDialogSchema>;
+
+export const navigableUrl = z.url().refine((value) => {
+  const protocol = new URL(value).protocol;
+  return protocol === "http:" || protocol === "https:" || value === "about:blank";
+}, "Only http, https and about:blank URLs can be opened");
+
 export const connectedTabSchema = z.object({
   tabId,
   url: z.string().min(1),
   title: z.string(),
   active: z.boolean().optional(),
   autoConnected: z.boolean().optional(),
+  pendingDialog: pendingDialogSchema.optional(),
 });
 export type ConnectedTab = z.infer<typeof connectedTabSchema>;
 
@@ -59,7 +73,7 @@ export const openTabSchema = z.object({
   type: z.literal("openTab"),
   version,
   requestId,
-  url: z.url(),
+  url: navigableUrl,
 });
 
 export const closeTabSchema = z.object({
@@ -97,6 +111,29 @@ export const errorMessageSchema = z.object({
   error: errorPayloadSchema,
 });
 
+export const pairSchema = z.object({
+  type: z.literal("pair"),
+  version,
+  code: z.string().regex(/^[A-Z2-9]{8}$/),
+});
+export const pairedSchema = z.object({
+  type: z.literal("paired"),
+  version,
+  token: z.string().regex(/^[0-9a-f]{64}$/),
+});
+export const downloadStateSchema = z.enum(["in_progress", "complete", "interrupted"]);
+export const downloadSchema = z.object({
+  type: z.literal("download"),
+  version,
+  downloadId: z.number().int().nonnegative(),
+  filename: z.string(),
+  url: z.string(),
+  state: downloadStateSchema,
+  bytesReceived: z.number().nonnegative(),
+  totalBytes: z.number(),
+  error: z.string().optional(),
+});
+
 export const pingSchema = z.object({ type: z.literal("ping"), version });
 export const pongSchema = z.object({ type: z.literal("pong"), version });
 
@@ -114,6 +151,9 @@ export const wireMessageSchema = z.discriminatedUnion("type", [
   errorMessageSchema,
   pingSchema,
   pongSchema,
+  pairSchema,
+  pairedSchema,
+  downloadSchema,
 ]);
 
 export type WireMessage = z.infer<typeof wireMessageSchema>;

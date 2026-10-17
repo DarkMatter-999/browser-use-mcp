@@ -51,6 +51,26 @@ const samples: WireMessage[] = [
   },
   { type: "ping", version: 1 },
   { type: "pong", version: 1 },
+  { type: "pair", version: 1, code: "ABCD2345" },
+  { type: "paired", version: 1, token },
+  {
+    type: "download",
+    version: 1,
+    downloadId: 3,
+    filename: "/home/u/Downloads/a.txt",
+    url: "http://127.0.0.1/a.txt",
+    state: "complete",
+    bytesReceived: 10,
+    totalBytes: 10,
+  },
+  {
+    type: "registerTab",
+    version: 1,
+    tabId: 9,
+    url: "https://example.com/",
+    title: "T",
+    pendingDialog: { type: "beforeunload", message: "Leave?", url: "https://example.com/" },
+  },
 ];
 
 describe("wire messages", () => {
@@ -97,6 +117,31 @@ describe("wire messages", () => {
     expect(() => parseWireMessage(JSON.stringify({ ...base, params: "x" }))).toThrow(
       BrowserUseError,
     );
+  });
+
+  it.each(["abcd2345", "ABCD2301"])("rejects the pairing code %s", (code) => {
+    expect(() => parseWireMessage(JSON.stringify({ type: "pair", version: 1, code }))).toThrow(
+      BrowserUseError,
+    );
+  });
+
+  it("rejects an unknown download state", () => {
+    const base = samples.find((m) => m.type === "download");
+    expect(() => parseWireMessage(JSON.stringify({ ...base, state: "paused" }))).toThrow(
+      BrowserUseError,
+    );
+  });
+
+  it.each([
+    ["javascript:alert(1)", false],
+    ["file:///etc/passwd", false],
+    ["http://example.com/", true],
+    ["https://example.com/", true],
+    ["about:blank", true],
+  ] as [string, boolean][])("openTab url %s accepted=%s", (url, ok) => {
+    const text = JSON.stringify({ type: "openTab", version: 1, requestId: randomUUID(), url });
+    if (ok) expect(parseWireMessage(text)).toMatchObject({ url });
+    else expect(() => parseWireMessage(text)).toThrow(BrowserUseError);
   });
 
   it("rejects unknown message types and non-positive tab ids", () => {

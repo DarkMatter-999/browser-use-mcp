@@ -13,6 +13,11 @@ export const ERROR_CODES = [
   "INVALID_ARGUMENT",
   "VERSION_MISMATCH",
   "INTERNAL",
+  "ELEMENT_NOT_FOUND",
+  "AMBIGUOUS_TARGET",
+  "ELEMENT_NOT_INTERACTABLE",
+  "NAVIGATION_FAILED",
+  "LIMIT_EXCEEDED",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

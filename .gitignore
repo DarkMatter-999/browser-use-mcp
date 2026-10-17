@@ -12,3 +12,4 @@ playwright-report/
 .DS_Store
 .superpowers/
 docs/superpowers/
+.keys/

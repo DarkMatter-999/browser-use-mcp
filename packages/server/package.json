@@ -19,6 +19,13 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "devDependencies": {
+    "@browser-use/protocol": "workspace:*",
+    "@types/ws": "^8.18.2",
     "tsup": "^9.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "ws": "^8.22.0",
+    "zod": "^4.6.7"
   }
 }

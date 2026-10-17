@@ -7,4 +7,5 @@ export default defineConfig({
   target: "node20",
   clean: true,
   sourcemap: true,
+  noExternal: ["@browser-use/protocol"],
 });

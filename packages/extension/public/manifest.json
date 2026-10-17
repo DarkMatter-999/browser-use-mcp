@@ -6,6 +6,13 @@
   "minimum_chrome_version": "120",
   "permissions": ["activeTab", "debugger", "downloads", "storage", "tabGroups", "tabs"],
   "host_permissions": ["http://127.0.0.1/*"],
-  "background": { "service_worker": "background.js", "type": "module" },
-  "action": { "default_title": "Browser Use", "default_popup": "popup.html" }
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Browser Use",
+    "default_popup": "popup.html"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoDbzrLazIRe/y/mXk3O+XUJpy3mvs/LnCXJ/Q8Fl77kaxJgW5kJgEAQqgUBeyThNCga/1kIrQqQ11cZJ8g1bvMC9tW8ijDYa/XbWzD4v9vYiIkT5rSu35a1QClMqvzcM9+occ+Bly4ziAFge6KGgk6+3q69Ov5WvZe8Dr8qcZ3/95Q0lu3i2YNY/CBji674vW2nV3lHklChdIgeSJTe8CepKb3gJ9lx41D4bikW6GxcqEJCVFGXG1C6yZ3zCQjca+E0SsW4lmg3odrv9w92vxvjwUuxyHJYliCUdD+NJO6mO3bgxQZVx3yIhXmhd7yz3H37ZdZiLLVTRaBAQpOQoHQIDAQAB"
 }

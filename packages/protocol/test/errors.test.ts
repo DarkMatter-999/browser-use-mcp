@@ -15,6 +15,11 @@ describe("ERROR_CODES", () => {
       "INVALID_ARGUMENT",
       "VERSION_MISMATCH",
       "INTERNAL",
+      "ELEMENT_NOT_FOUND",
+      "AMBIGUOUS_TARGET",
+      "ELEMENT_NOT_INTERACTABLE",
+      "NAVIGATION_FAILED",
+      "LIMIT_EXCEEDED",
     ]);
   });
 });
@@ -35,6 +40,19 @@ describe("BrowserUseError", () => {
     const payload = new BrowserUseError("TIMEOUT", "Timed out").toPayload();
     expect(payload).toEqual({ code: "TIMEOUT", message: "Timed out" });
     expect(errorPayloadSchema.parse(payload)).toEqual(payload);
+  });
+
+  it("includes hint and details in the payload", () => {
+    const payload = new BrowserUseError("DIALOG_OPEN", "Open", {
+      hint: "h",
+      details: { a: 1 },
+    }).toPayload();
+    expect(payload).toEqual({ code: "DIALOG_OPEN", message: "Open", hint: "h", details: { a: 1 } });
+    expect(errorPayloadSchema.parse(payload)).toEqual(payload);
+  });
+
+  it("leaves cause undefined when none is passed", () => {
+    expect(new BrowserUseError("INTERNAL", "boom").cause).toBeUndefined();
   });
 
   it("keeps the cause", () => {
