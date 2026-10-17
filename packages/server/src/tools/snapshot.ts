@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { ToolContext } from "../mcp/context";
 import { defineTool } from "../mcp/define-tool";
 import { type ToolOutput, textResult } from "../mcp/format";
+import { overlayHostBackendId, withoutOverlay } from "../pointer/overlay-filter";
 import { watchNavigation } from "../refs/ref-store";
 import { type AxNode, buildSnapshot } from "../refs/snapshot";
 import type { RefStore } from "../refs/types";
@@ -67,7 +68,10 @@ async function takeSnapshot(
   const tree = (await ctx.sendCommand(tabId, "Accessibility.getFullAXTree", {})) as {
     nodes?: AxNode[];
   };
-  const main = buildSnapshot(tree.nodes ?? [], { maxNodes });
+  const hostId = await overlayHostBackendId((method, params) =>
+    ctx.sendCommand(tabId, method, params),
+  );
+  const main = buildSnapshot(withoutOverlay(tree.nodes ?? [], hostId), { maxNodes });
   const lines = [...main.lines];
   const refs = new Map(main.refs);
   let truncated = main.truncated;

@@ -2,6 +2,9 @@ export const OVERLAY_SCRIPT = `(() => {
   if (window.__browserUseOverlay) { window.__browserUseOverlay.ping(); return true; }
   const host = document.createElement("div");
   host.setAttribute("data-browser-use-overlay", "");
+  // Keep the overlay (and its label text) out of the accessibility tree and out of focus.
+  host.setAttribute("aria-hidden", "true");
+  host.setAttribute("inert", "");
   host.setAttribute("popover", "manual");
   host.style.cssText = "all:initial;position:fixed;inset:0;width:100vw;height:100vh;margin:0;padding:0;border:0;background:transparent;pointer-events:none;overflow:visible;z-index:2147483647;";
   const root = host.attachShadow({ mode: "closed" });

@@ -1,4 +1,4 @@
-import { mkdir, unlink } from "node:fs/promises";
+import { unlink } from "node:fs/promises";
 import { BrowserUseError } from "@browser-use/protocol";
 import pkg from "../../package.json" with { type: "json" };
 import { canConnect, isPipe } from "../client/ensure-daemon";
@@ -8,6 +8,7 @@ import { ExtensionBackend } from "./extension-backend";
 import { IdleMonitor } from "./idle-monitor";
 import { IpcServer } from "./ipc-server";
 import { createLogger } from "./log";
+import { ensurePrivateHome } from "./private-home";
 import {
   FailureLimiter,
   loadOrCreateToken,
@@ -20,7 +21,7 @@ const IDLE_MS = 15 * 60_000;
 
 export async function runDaemon(env: NodeJS.ProcessEnv = process.env): Promise<void> {
   const paths = resolvePaths(env);
-  await mkdir(paths.home, { recursive: true, mode: 0o700 });
+  await ensurePrivateHome(paths.home);
   const log = createLogger(paths.logFile);
   const port = resolvePort(env);
   let token = await loadOrCreateToken(paths);
@@ -36,6 +37,7 @@ export async function runDaemon(env: NodeJS.ProcessEnv = process.env): Promise<v
       consumePairingCode: (code) => (pairing.consume(code) ? token : undefined),
       limiter,
     },
+    log,
   });
   const backend = new ExtensionBackend(bridge);
   let shuttingDown = false;
@@ -60,6 +62,7 @@ export async function runDaemon(env: NodeJS.ProcessEnv = process.env): Promise<v
       bridge.disconnectPeer();
     },
     onShutdown: () => void shutdown(0),
+    log,
   });
 
   if (await canConnect(paths.ipcEndpoint)) {

@@ -346,6 +346,12 @@ describe.skipIf(!chromeAvailable)(suiteName, () => {
     expect(box.height).toBeGreaterThan(0);
     const { text } = await ok("browser_snapshot", { tabId });
     expect(text.toLowerCase()).not.toContain("overlay");
+    // The overlay's label ("Click selector #increment") must not leak into the snapshot.
+    expect(text).not.toContain("Click selector");
+    // Nor can a selector that matches the overlay host target it.
+    const hostSelector = await call("browser_click", { tabId, selector: "html > div:last-child" });
+    expect(hostSelector.isError).toBe(true);
+    expect((hostSelector.json as unknown as ErrorJson).error.code).toBe("ELEMENT_NOT_FOUND");
     // Visual check: the region around the click point renders differently with the overlay
     // shown (cursor + label) than with it hidden.
     const { x, y } = clicked.json as { x: number; y: number };
@@ -391,6 +397,39 @@ describe.skipIf(!chromeAvailable)(suiteName, () => {
       { timeoutMs: 30_000, intervalMs: 500, what: "the fixture tab after a daemon restart" },
     );
     expect(await evaluate("1 + 1")).toBe(2);
+  });
+
+  it("service-worker restart recovery", async () => {
+    const cdp = await browser.context.newCDPSession(popup);
+    const states: string[] = [];
+    cdp.on("ServiceWorker.workerVersionUpdated", ({ versions }) => {
+      for (const version of versions) {
+        if (version.scriptURL.startsWith(`chrome-extension://${EXTENSION_ID}/`)) {
+          states.push(version.runningStatus);
+        }
+      }
+    });
+    await cdp.send("ServiceWorker.enable");
+    await cdp.send("ServiceWorker.stopAllWorkers");
+    await poll(() => Promise.resolve(states.includes("stopped") ? true : undefined), {
+      what: "the extension service worker to stop",
+    });
+    await cdp.detach();
+    // Any extension event wakes the worker again; a popup message is the simplest.
+    await poll(async () => (await popupSend(popup, { type: "get-status" })) ?? undefined, {
+      what: "the restarted service worker to answer",
+    });
+    const listed = await poll(
+      async () => (await tabs()).find((tab) => tab.tabId === tabId && tab.url === fixtureUrl),
+      { timeoutMs: 30_000, intervalMs: 300, what: "the fixture tab after a worker restart" },
+    );
+    expect(listed.tabId).toBe(tabId);
+    expect(await evaluate("1 + 1")).toBe(2);
+    const status = (await popupSend(popup, { type: "get-status", tabId })) as {
+      state: string;
+      connectedCount: number;
+    };
+    expect(status).toMatchObject({ state: "connected", connectedCount: 1 });
   });
 
   it("disconnect", async () => {

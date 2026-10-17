@@ -16,7 +16,13 @@ import {
 } from "@browser-use/protocol";
 import { z } from "zod";
 import type { Paths } from "../config";
-import { canConnect, ensureDaemon, type SpawnDaemon } from "./ensure-daemon";
+import {
+  canConnect,
+  type EnsureDaemonDeps,
+  ensureDaemon,
+  restartDaemon,
+  type SpawnDaemon,
+} from "./ensure-daemon";
 
 const pairingCodeSchema = z.object({ code: z.string(), expiresInSeconds: z.number() });
 
@@ -48,6 +54,25 @@ function notRunning(): BrowserUseError {
   });
 }
 
+function ensureDeps(options: ConnectOptions): EnsureDaemonDeps {
+  return {
+    clientVersion: options.clientVersion,
+    ...(options.spawnDaemon ? { spawnDaemon: options.spawnDaemon } : {}),
+  };
+}
+
+function connectSocket(endpoint: string): Promise<net.Socket> {
+  return new Promise<net.Socket>((resolve, reject) => {
+    const connection = net.createConnection(endpoint);
+    connection.once("connect", () => {
+      resolve(connection);
+    });
+    connection.once("error", () => {
+      reject(notRunning());
+    });
+  });
+}
+
 export class DaemonClient {
   #socket: net.Socket;
   readonly #options: ConnectOptions;
@@ -72,43 +97,55 @@ export class DaemonClient {
   }
 
   static async connect(options: ConnectOptions): Promise<DaemonClient> {
-    const { paths, clientVersion, entryScript, autostart = true, spawnDaemon } = options;
-    const deps = spawnDaemon ? { spawnDaemon } : {};
-    if (autostart) await ensureDaemon(paths, entryScript, deps);
+    const { paths, entryScript, autostart = true } = options;
+    if (autostart) await ensureDaemon(paths, entryScript, ensureDeps(options));
     else if (!(await canConnect(paths.ipcEndpoint))) throw notRunning();
     let client = await DaemonClient.#open(options);
-    if (autostart && compareVersions(client.#daemonVersion, clientVersion) < 0) {
-      // Older daemon than this client: ask it to exit once, then start the matching one.
-      await client.shutdown().catch(() => undefined);
-      client.close();
-      for (let attempt = 0; attempt < 100 && (await canConnect(paths.ipcEndpoint)); attempt += 1) {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      await ensureDaemon(paths, entryScript, deps);
+    if (client.#needsRestart()) {
+      // Older daemon than this client: let it drain and exit, then start the matching one.
+      await restartDaemon(
+        paths,
+        entryScript,
+        () => client.#shutdownForRestart(),
+        ensureDeps(options),
+      );
       client = await DaemonClient.#open(options);
     }
     return client;
   }
 
   static async #open(options: ConnectOptions): Promise<DaemonClient> {
-    const socket = await new Promise<net.Socket>((resolve, reject) => {
-      const connection = net.createConnection(options.paths.ipcEndpoint);
-      connection.once("connect", () => {
-        resolve(connection);
-      });
-      connection.once("error", () => {
-        reject(notRunning());
-      });
-    });
+    const socket = await connectSocket(options.paths.ipcEndpoint);
     const client = new DaemonClient(socket, options);
-    const ack = client.#awaitHello();
-    client.#write({
+    await client.#greet();
+    return client;
+  }
+
+  async #greet(): Promise<void> {
+    const ack = this.#awaitHello();
+    this.#write({
       type: "hello",
       protocolVersion: PROTOCOL_VERSION,
-      clientVersion: options.clientVersion,
+      clientVersion: this.#options.clientVersion,
     });
-    client.#daemonVersion = await ack;
-    return client;
+    this.#daemonVersion = await ack;
+  }
+
+  #needsRestart(): boolean {
+    const { autostart = true, clientVersion } = this.#options;
+    return autostart && compareVersions(this.#daemonVersion, clientVersion) < 0;
+  }
+
+  /** Asks the connected daemon to drain and exit, on this socket only (never reconnects). */
+  async #shutdownForRestart(): Promise<boolean> {
+    try {
+      await this.#call({ type: "shutdown" });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      this.#socket.destroy();
+    }
   }
 
   #adopt(socket: net.Socket): void {
@@ -223,22 +260,20 @@ export class DaemonClient {
   }
 
   async #reopen(): Promise<void> {
-    const { paths, entryScript, autostart = true, spawnDaemon, clientVersion } = this.#options;
-    if (autostart) await ensureDaemon(paths, entryScript, spawnDaemon ? { spawnDaemon } : {});
-    const socket = await new Promise<net.Socket>((resolve, reject) => {
-      const connection = net.createConnection(paths.ipcEndpoint);
-      connection.once("connect", () => {
-        resolve(connection);
-      });
-      connection.once("error", () => {
-        reject(notRunning());
-      });
-    });
-    this.#socket = socket;
-    this.#adopt(socket);
-    const ack = this.#awaitHello();
-    this.#write({ type: "hello", protocolVersion: PROTOCOL_VERSION, clientVersion });
-    this.#daemonVersion = await ack;
+    const { paths, entryScript, autostart = true } = this.#options;
+    if (autostart) await ensureDaemon(paths, entryScript, ensureDeps(this.#options));
+    await this.#attach();
+    // The daemon we reached may be older than this client (another, older MCP process started
+    // it in the gap). Replace it, exactly as connect() does, instead of silently staying on it.
+    if (this.#needsRestart()) {
+      await restartDaemon(
+        paths,
+        entryScript,
+        () => this.#shutdownForRestart(),
+        ensureDeps(this.#options),
+      );
+      await this.#attach();
+    }
     for (const [subscriptionId, { tabId }] of this.#listeners) {
       this.#write({ type: "subscribe", subscriptionId, tabId });
     }
@@ -247,8 +282,25 @@ export class DaemonClient {
     }
   }
 
+  async #attach(): Promise<void> {
+    const socket = await connectSocket(this.#options.paths.ipcEndpoint);
+    this.#socket = socket;
+    this.#adopt(socket);
+    await this.#greet();
+  }
+
   async #request(message: Request): Promise<JsonValue> {
     await this.#ensureOpen();
+    return this.#call(message);
+  }
+
+  /** Sends on the current socket without reconnecting. */
+  #call(message: Request): Promise<JsonValue> {
+    if (this.#socket.destroyed) {
+      return Promise.reject(
+        new BrowserUseError("BRIDGE_DISCONNECTED", "The Browser Use daemon disconnected"),
+      );
+    }
     const id = ++this.#nextId;
     return new Promise((resolve, reject) => {
       this.#pending.set(id, { resolve, reject });

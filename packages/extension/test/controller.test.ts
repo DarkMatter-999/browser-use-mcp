@@ -1,7 +1,17 @@
-import { BrowserUseError, type WireMessage } from "@browser-use/protocol";
+import {
+  BrowserUseError,
+  MAX_WIRE_MESSAGE_BYTES,
+  serializeWireMessage,
+  type WireMessage,
+} from "@browser-use/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BridgeState } from "../src/bridge/client";
-import { Controller, type ControllerDeps, type TabInfo } from "../src/controller";
+import {
+  Controller,
+  type ControllerDeps,
+  type PersistedTab,
+  type TabInfo,
+} from "../src/controller";
 
 const rid = "11111111-1111-4111-8111-111111111111";
 
@@ -15,7 +25,8 @@ function setup(state: BridgeState = "ready", overrides: Partial<ControllerDeps> 
   const adapter = {
     attach: vi.fn(() => Promise.resolve()),
     detach: vi.fn(() => Promise.resolve()),
-    sendCommand: vi.fn(() => Promise.resolve({ value: 1 })),
+    sendCommand: vi.fn((): Promise<unknown> => Promise.resolve({ value: 1 })),
+    reattach: vi.fn((tabIds: readonly number[]) => Promise.resolve([...tabIds])),
   };
   const tabInfo = (id: number): TabInfo => ({
     id,
@@ -112,6 +123,52 @@ describe("bridge commands", () => {
     });
     expect(adapter.sendCommand).toHaveBeenCalledWith(7, "Runtime.evaluate", { expression: "1" });
     expect(sent[0]).toEqual({ type: "response", version: 1, requestId: rid, result: { value: 1 } });
+  });
+
+  it("answers LIMIT_EXCEEDED when the result is over the 2 MiB bridge limit", async () => {
+    const { controller, adapter, bridge, sent } = await connected();
+    // Behave like BridgeClient.send: validate, then refuse anything over the wire limit.
+    bridge.send.mockImplementation((m: WireMessage) => {
+      const text = serializeWireMessage(m);
+      if (text.length > MAX_WIRE_MESSAGE_BYTES) {
+        throw new BrowserUseError("LIMIT_EXCEEDED", "Bridge message exceeds the 2 MiB limit");
+      }
+      return sent.push(m);
+    });
+    adapter.sendCommand.mockResolvedValueOnce({ value: "x".repeat(MAX_WIRE_MESSAGE_BYTES) });
+    await controller.onBridgeMessage({
+      type: "command",
+      version: 1,
+      requestId: rid,
+      tabId: 7,
+      method: "Accessibility.getFullAXTree",
+      params: {},
+    });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      type: "error",
+      requestId: rid,
+      error: { code: "LIMIT_EXCEEDED", message: expect.stringMatching(/2 MiB/) as string },
+    });
+  });
+
+  it("answers with a schema-valid error when Chrome's error message is empty", async () => {
+    const { controller, adapter, bridge, sent } = await connected();
+    bridge.send.mockImplementation((m: WireMessage) => {
+      serializeWireMessage(m);
+      return sent.push(m);
+    });
+    adapter.sendCommand.mockRejectedValueOnce(new Error(""));
+    await controller.onBridgeMessage({
+      type: "command",
+      version: 1,
+      requestId: rid,
+      tabId: 7,
+      method: "Runtime.evaluate",
+      params: { expression: "1" },
+    });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ type: "error", requestId: rid, error: { code: "INTERNAL" } });
   });
 
   it("answers TAB_NOT_CONNECTED for tabs it does not control", async () => {
@@ -216,6 +273,16 @@ describe("upkeep", () => {
     controller.onDebuggerEvent(8, "Page.loadEventFired", {});
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ type: "event", tabId: 7, method: "Page.loadEventFired" });
+  });
+
+  it("tells the download tracker only about downloads that connected tabs begin", async () => {
+    const expectDownload = vi.fn();
+    const { controller } = setup("ready", { downloads: { expect: expectDownload } });
+    await controller.onPopupMessage({ type: "connect-active-tab" });
+    controller.onDebuggerEvent(8, "Page.downloadWillBegin", { url: "https://other/x" });
+    controller.onDebuggerEvent(7, "Page.downloadWillBegin", { url: "https://t7/file.zip" });
+    expect(expectDownload).toHaveBeenCalledTimes(1);
+    expect(expectDownload).toHaveBeenCalledWith("https://t7/file.zip");
   });
 
   it("re-registers a tab with its new title on update", async () => {
@@ -329,5 +396,126 @@ describe("pair and status messages", () => {
       state: "disconnected",
       connectedCount: 0,
     });
+  });
+});
+
+describe("service-worker restart", () => {
+  function memorySession(initial?: unknown) {
+    let stored: unknown = initial;
+    const session = {
+      load: vi.fn(() => Promise.resolve(stored)),
+      save: vi.fn((tabs: PersistedTab[]) => {
+        stored = tabs;
+        return Promise.resolve();
+      }),
+    };
+    return { session, stored: () => stored };
+  }
+  const settle = () => vi.advanceTimersByTimeAsync(0);
+
+  it("persists connected tabs, agent tabs and open dialogs, and forgets disconnected ones", async () => {
+    const { session, stored } = memorySession();
+    const { controller } = setup("ready", { session });
+    await controller.onPopupMessage({ type: "connect-active-tab" });
+    await controller.onBridgeMessage({
+      type: "openTab",
+      version: 1,
+      requestId: rid,
+      url: "https://t50/",
+    });
+    controller.onDebuggerEvent(7, "Page.javascriptDialogOpening", {
+      type: "confirm",
+      message: "Sure?",
+      url: "https://t7/",
+    });
+    await settle();
+    expect(stored()).toEqual([
+      { tabId: 7, auto: false, dialog: { type: "confirm", message: "Sure?", url: "https://t7/" } },
+      { tabId: 50, auto: true },
+    ]);
+    await controller.onPopupMessage({ type: "disconnect-tab", tabId: 7 });
+    await settle();
+    expect(stored()).toEqual([{ tabId: 50, auto: true }]);
+  });
+
+  it("adopts still-attached tabs after a restart and re-registers them when the bridge is ready", async () => {
+    const { session } = memorySession([
+      { tabId: 7, auto: false, dialog: { type: "alert", message: "open", url: "https://t7/" } },
+      { tabId: 8, auto: true },
+      { tabId: 9, auto: false },
+    ]);
+    const restarted = setup("connecting", { session });
+    // Tab 9's debugger session did not survive the restart.
+    restarted.adapter.reattach.mockResolvedValueOnce([7, 8]);
+    await restarted.controller.restore();
+    expect(restarted.adapter.reattach).toHaveBeenCalledWith([7, 8, 9]);
+    expect(restarted.adapter.attach).not.toHaveBeenCalled();
+    restarted.controller.onBridgeState("ready");
+    await settle();
+    const registered = restarted.sent.filter((m) => m.type === "registerTab");
+    expect(registered).toEqual([
+      expect.objectContaining({
+        tabId: 7,
+        pendingDialog: { type: "alert", message: "open", url: "https://t7/" },
+      }),
+      expect.objectContaining({ tabId: 8, autoConnected: true }),
+    ]);
+    await restarted.controller.onBridgeMessage({
+      type: "command",
+      version: 1,
+      requestId: rid,
+      tabId: 8,
+      method: "Runtime.evaluate",
+      params: { expression: "1" },
+    });
+    expect(restarted.sent.at(-1)).toMatchObject({ type: "response", requestId: rid });
+    const reply = await restarted.controller.onPopupMessage({ type: "get-status", tabId: 7 });
+    expect(reply).toMatchObject({ state: "connected", connectedCount: 2 });
+    await settle();
+    expect(session.save).toHaveBeenLastCalledWith([
+      { tabId: 7, auto: false, dialog: { type: "alert", message: "open", url: "https://t7/" } },
+      { tabId: 8, auto: true },
+    ]);
+  });
+
+  it("does not re-attach after a restart when an adopted tab is reconnected from the popup", async () => {
+    const { session } = memorySession([{ tabId: 7, auto: false }]);
+    const { controller, adapter } = setup("ready", { session });
+    await controller.restore();
+    await controller.onPopupMessage({ type: "connect-active-tab" });
+    expect(adapter.attach).not.toHaveBeenCalled();
+  });
+
+  it("ignores malformed stored state", async () => {
+    const { session } = memorySession([{ tabId: "x" }]);
+    const { controller, adapter } = setup("ready", { session });
+    await controller.restore();
+    expect(adapter.reattach).not.toHaveBeenCalled();
+  });
+});
+
+describe("dialogs across a bridge reconnect", () => {
+  it("reports an open dialog in registerTab and drops it once closed", async () => {
+    const { controller, sent } = setup();
+    await controller.onPopupMessage({ type: "connect-active-tab" });
+    controller.onDebuggerEvent(7, "Page.javascriptDialogOpening", {
+      type: "alert",
+      message: "hi",
+      url: "https://t7/",
+      hasBrowserHandler: true,
+    });
+    sent.length = 0;
+    controller.onBridgeState("backoff");
+    controller.onBridgeState("ready");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sent.find((m) => m.type === "registerTab")).toMatchObject({
+      tabId: 7,
+      pendingDialog: { type: "alert", message: "hi", url: "https://t7/" },
+    });
+    controller.onDebuggerEvent(7, "Page.javascriptDialogClosed", { result: true });
+    sent.length = 0;
+    controller.onBridgeState("ready");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sent.find((m) => m.type === "registerTab")).not.toHaveProperty("pendingDialog");
   });
 });

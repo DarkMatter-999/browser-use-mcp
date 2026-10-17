@@ -1,3 +1,4 @@
+import { BrowserUseError } from "@browser-use/protocol";
 import { describe, expect, it } from "vitest";
 import { evaluate, evaluateTools } from "../src/tools/evaluate";
 import { findTool, parseText } from "./helpers/tool";
@@ -23,6 +24,20 @@ describe("evaluate", () => {
       awaitPromise: true,
       userGesture: false,
       timeout: 10_000,
+    });
+  });
+
+  it("reports a result refused by the bridge size limit as truncated", async () => {
+    const ctx = scriptedContext(
+      {
+        "Runtime.evaluate": () => {
+          throw new BrowserUseError("LIMIT_EXCEEDED", "Response exceeds the 2 MiB bridge limit");
+        },
+      },
+      tab,
+    );
+    expect(await evaluate(ctx, { tabId: 1, expression: "big" })).toMatchObject({
+      truncated: true,
     });
   });
 

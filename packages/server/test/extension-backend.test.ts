@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import type { BrowserUseError, ConnectedTab } from "@browser-use/protocol";
 import { describe, expect, it, vi } from "vitest";
 import type { BridgeServer } from "../src/daemon/bridge-server";
-import { ExtensionBackend } from "../src/daemon/extension-backend";
+import { ExtensionBackend, MAX_TRACKED_DOWNLOADS } from "../src/daemon/extension-backend";
 
 class FakePeer {
   tabs: ConnectedTab[] = [{ tabId: 1, url: "https://a/", title: "A" }];
@@ -70,6 +70,21 @@ describe("ExtensionBackend", () => {
     expect(peer.failed[0]).toMatchObject({ tabId: 1, error: { code: "DIALOG_OPEN" } });
   });
 
+  it("seeds dialog state from registerTab after a reconnect and blocks commands", async () => {
+    const { backend, bridge, peer } = setup();
+    bridge.emit("tabRegistered", 1, opening);
+    expect(backend.listTabs()[0]?.pendingDialog).toMatchObject({ type: "alert", message: "hi" });
+    await expect(backend.sendCommand(1, "Runtime.evaluate", {}, 1000)).rejects.toMatchObject({
+      code: "DIALOG_OPEN",
+    });
+    expect(peer.commands).toEqual([]);
+    bridge.emit("tabRegistered", 1, undefined);
+    expect(backend.listTabs()[0]?.pendingDialog).toBeUndefined();
+    await expect(backend.sendCommand(1, "Runtime.evaluate", {}, 1000)).resolves.toEqual({
+      ok: true,
+    });
+  });
+
   it("overlays pendingDialog in listTabs and clears it on close / tab removal", () => {
     const { backend, bridge } = setup();
     bridge.emit("tabEvent", 1, "Page.javascriptDialogOpening", opening);
@@ -99,6 +114,22 @@ describe("ExtensionBackend", () => {
     stop();
     bridge.emit("tabEvent", 1, "Page.loadEventFired", {});
     expect(events).not.toHaveBeenCalled();
+  });
+
+  it("forgets the least recently updated downloads beyond the cap", () => {
+    const { backend, bridge } = setup();
+    const base = { type: "download", version: 1, url: "http://x/a", totalBytes: 1, filename: "" };
+    for (let id = 1; id <= MAX_TRACKED_DOWNLOADS + 5; id++) {
+      bridge.emit("download", { ...base, downloadId: id, state: "in_progress", bytesReceived: 0 });
+    }
+    bridge.emit("download", { ...base, downloadId: 3, state: "complete", bytesReceived: 1 });
+    const ids = backend.listDownloads().map((d) => d.downloadId);
+    expect(ids).toHaveLength(MAX_TRACKED_DOWNLOADS);
+    expect(ids).toContain(3);
+    expect(ids).not.toContain(1);
+    expect(ids).not.toContain(6);
+    expect(ids).toContain(7);
+    expect(ids.at(-1)).toBe(3);
   });
 
   it("tracks downloads with increasing sequence numbers and notifies", () => {

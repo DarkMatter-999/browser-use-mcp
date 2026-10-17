@@ -13,6 +13,9 @@ import { DialogTracker } from "./dialog-tracker";
 
 type DownloadMessage = Extract<WireMessage, { type: "download" }>;
 
+/** Oldest downloads are forgotten beyond this many, so the map cannot grow without bound. */
+export const MAX_TRACKED_DOWNLOADS = 200;
+
 function dialogOpenError(dialog: PendingDialog): BrowserUseError {
   return new BrowserUseError(
     "DIALOG_OPEN",
@@ -44,6 +47,12 @@ export class ExtensionBackend implements BrowserBackend {
     this.#bridge = bridge;
     bridge.on("tabsChanged", () => {
       this.#emitTabs();
+    });
+    bridge.on("tabRegistered", (tabId: number, pendingDialog: PendingDialog | undefined) => {
+      // The extension's registerTab is authoritative: it saw every dialog event in order,
+      // including any sent while the bridge (or the daemon) was down.
+      if (pendingDialog) this.#dialogs.set(tabId, pendingDialog);
+      else this.#dialogs.clear(tabId);
     });
     bridge.on("tabRemoved", (tabId: number) => {
       this.#dialogs.clear(tabId);
@@ -136,6 +145,8 @@ export class ExtensionBackend implements BrowserBackend {
 
   #onDownload(message: DownloadMessage): void {
     const { downloadId, filename, url, state, bytesReceived, totalBytes, error } = message;
+    // Delete first so the map's insertion order stays "least recently updated first".
+    this.#downloads.delete(downloadId);
     this.#downloads.set(downloadId, {
       downloadId,
       filename,
@@ -146,6 +157,10 @@ export class ExtensionBackend implements BrowserBackend {
       ...(error === undefined ? {} : { error }),
       sequence: ++this.#sequence,
     });
+    for (const id of this.#downloads.keys()) {
+      if (this.#downloads.size <= MAX_TRACKED_DOWNLOADS) break;
+      this.#downloads.delete(id);
+    }
     const snapshot = this.listDownloads();
     for (const listener of this.#downloadListeners) listener(snapshot);
   }

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -20,4 +20,28 @@ describe("createLogger", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === "win32")(
+    "creates the log 0600 and tightens an existing world-readable one",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "bu-"));
+      try {
+        const fresh = join(dir, "fresh.log");
+        await createLogger(fresh).info("x");
+        expect((await stat(fresh)).mode & 0o777).toBe(0o600);
+        const old = join(dir, "old.log");
+        await writeFile(old, "old\n");
+        await chmod(old, 0o644);
+        await createLogger(old).info("y");
+        expect((await stat(old)).mode & 0o777).toBe(0o600);
+        const rotating = join(dir, "rotating.log");
+        const log = createLogger(rotating, { maxBytes: 10 });
+        await log.info("a long enough line");
+        await log.info("after rotation");
+        expect((await stat(rotating)).mode & 0o777).toBe(0o600);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });

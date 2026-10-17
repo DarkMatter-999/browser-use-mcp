@@ -1,5 +1,6 @@
 import { BrowserUseError, type JsonObject } from "@browser-use/protocol";
 import type { ToolContext } from "../mcp/context";
+import { overlayHostNodeId } from "../pointer/overlay-filter";
 
 type TargetContext = Pick<ToolContext, "listTabs" | "sendCommand" | "refs">;
 
@@ -86,12 +87,14 @@ export async function resolveTarget(
 
   const selector = target.selector ?? "";
   let nodeIds: unknown;
+  let rootNodeId = 0;
   try {
     const root = (await send("DOM.getDocument", { depth: 1, pierce: true })) as {
       root: { nodeId: number };
     };
+    rootNodeId = root.root.nodeId;
     nodeIds = (
-      (await send("DOM.querySelectorAll", { nodeId: root.root.nodeId, selector })) as {
+      (await send("DOM.querySelectorAll", { nodeId: rootNodeId, selector })) as {
         nodeIds?: unknown;
       }
     ).nodeIds;
@@ -103,7 +106,13 @@ export async function resolveTarget(
       `Invalid selector ${selector}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  const ids = Array.isArray(nodeIds) ? (nodeIds as number[]) : [];
+  let ids = Array.isArray(nodeIds) ? (nodeIds as number[]) : [];
+  if (ids.length > 0) {
+    // Spec section 9: the pointer overlay is never a target (e.g. `html > div:last-child`).
+    // querySelectorAll does not enter its closed shadow root, so only the host can match.
+    const host = await overlayHostNodeId(send, rootNodeId);
+    if (host !== undefined) ids = ids.filter((id) => id !== host);
+  }
   if (ids.length === 0) {
     throw new BrowserUseError("ELEMENT_NOT_FOUND", `No element matches ${selector}`, {
       hint: "Take a browser_snapshot to see what is on the page.",

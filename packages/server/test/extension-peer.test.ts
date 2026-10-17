@@ -14,14 +14,25 @@ const hello = () => ({
   extensionVersion: "0.0.0",
 });
 
-function setup() {
+function setup(lines: string[] = []) {
   const socket = new FakeSocket();
+  const log = {
+    info: (line: string) => {
+      lines.push(`INFO ${line}`);
+      return Promise.resolve();
+    },
+    error: (line: string) => {
+      lines.push(`ERROR ${line}`);
+      return Promise.resolve();
+    },
+  };
   const codes = new PairingCodes();
   const limiter = new FailureLimiter(3, 60_000);
   const events = {
     onReady: vi.fn(),
     onClose: vi.fn(),
     onTabsChanged: vi.fn(),
+    onTabRegistered: vi.fn(),
     onTabRemoved: vi.fn(),
     onTabEvent: vi.fn(),
     onDownload: vi.fn(),
@@ -35,8 +46,9 @@ function setup() {
     },
     events,
     "9.9.9",
+    { log, label: "peer :1234" },
   );
-  return { socket, peer, codes, events, limiter };
+  return { socket, peer, codes, events, limiter, lines };
 }
 
 function ready() {
@@ -74,34 +86,63 @@ describe("handshake", () => {
     expect(peer.isReady).toBe(true);
   });
 
-  it("denies an unknown pairing code", () => {
+  it("denies an unknown pairing code without NOT_PAIRED (which would erase a stored token)", () => {
     const { socket } = setup();
     socket.receive({ type: "pair", version: 1, code: "ABCDEFGH" });
-    expect(socket.last()).toMatchObject({ error: { code: "NOT_PAIRED" } });
+    expect(socket.last()).toMatchObject({ error: { code: "INVALID_ARGUMENT" } });
     expect(socket.closeCode).toBe(1008);
   });
 
-  it("blocks all attempts after the limiter trips, even with a valid token", () => {
-    const { limiter } = setup();
+  it("still accepts a valid token while pairing is throttled", () => {
+    const { socket, peer, limiter } = setup();
     for (let index = 0; index < 3; index += 1) limiter.record();
-    const second = new FakeSocket();
-    const events = {
-      onReady: vi.fn(),
-      onClose: vi.fn(),
-      onTabsChanged: vi.fn(),
-      onTabRemoved: vi.fn(),
-      onTabEvent: vi.fn(),
-      onDownload: vi.fn(),
-    };
-    const peer = new ExtensionPeer(
-      second,
-      { verifyToken: () => true, consumePairingCode: () => TOKEN, limiter },
-      events,
-      "1",
-    );
-    second.receive(hello());
-    expect(peer.isReady).toBe(false);
-    expect(second.closeCode).toBe(1008);
+    expect(limiter.blocked()).toBe(true);
+    socket.receive(hello());
+    expect(peer.isReady).toBe(true);
+  });
+
+  it("answers a throttled pair attempt with LIMIT_EXCEEDED, not NOT_PAIRED", () => {
+    const { socket, codes, limiter } = setup();
+    const code = codes.create();
+    for (let index = 0; index < 3; index += 1) limiter.record();
+    socket.receive({ type: "pair", version: 1, code });
+    expect(socket.last()).toMatchObject({ type: "error", error: { code: "LIMIT_EXCEEDED" } });
+    expect(socket.closeCode).toBe(1008);
+  });
+
+  it("does not let bad hellos throttle anything", () => {
+    const { limiter } = setup();
+    for (let index = 0; index < 10; index += 1) {
+      const { socket } = setup();
+      socket.receive({ ...hello(), token: "d".repeat(64) });
+    }
+    expect(limiter.blocked()).toBe(false);
+    const { socket, peer } = setup();
+    socket.receive(hello());
+    expect(peer.isReady).toBe(true);
+    expect(socket.last()).toMatchObject({ type: "helloAck" });
+  });
+
+  it("logs denials and malformed messages without the token or pairing code", () => {
+    const lines: string[] = [];
+    const bad = setup(lines);
+    bad.socket.receive({ ...hello(), token: "d".repeat(64) });
+    const pair = setup(lines);
+    pair.socket.receive({ type: "pair", version: 1, code: "ZZZZ2222" });
+    const malformed = setup(lines);
+    malformed.socket.receive({ type: "hello", version: 1, token: "e".repeat(64) });
+    const early = setup(lines);
+    early.socket.receive({ type: "ping", version: 1 });
+    expect(lines).toEqual([
+      expect.stringMatching(/^ERROR peer :1234: handshake denied \(NOT_PAIRED\)/),
+      expect.stringMatching(/^ERROR peer :1234: handshake denied \(INVALID_ARGUMENT\)/),
+      expect.stringMatching(/^ERROR peer :1234: protocol error, closing: Invalid bridge message/),
+      expect.stringMatching(/^ERROR peer :1234: protocol error, closing: Expected hello or pair/),
+    ]);
+    const text = lines.join("\n");
+    expect(text).not.toContain("d".repeat(64));
+    expect(text).not.toContain("e".repeat(64));
+    expect(text).not.toContain("ZZZZ2222");
   });
 
   it("closes with 1002 when anything other than pair/hello arrives first", () => {
@@ -117,10 +158,11 @@ describe("handshake", () => {
     expect(socket.closeCode).toBe(1002);
   });
 
-  it("closes the socket if the handshake does not finish in 10 s", () => {
+  it("closes the socket with TIMEOUT if the handshake does not finish in 10 s", () => {
     const { socket } = setup();
     vi.advanceTimersByTime(10_001);
     expect(socket.closeCode).toBe(1008);
+    expect(socket.last()).toMatchObject({ type: "error", error: { code: "TIMEOUT" } });
   });
 });
 
@@ -135,6 +177,23 @@ describe("after handshake", () => {
     const { socket } = await ready();
     vi.advanceTimersByTime(90_001);
     expect(socket.closeCode).toBe(1001);
+  });
+
+  it("reports a registered tab's pending dialog to the backend instead of storing it", async () => {
+    const { socket, peer, events } = await ready();
+    const dialog = { type: "alert", message: "still open", url: "https://a/" };
+    socket.receive({
+      type: "registerTab",
+      version: 1,
+      tabId: 9,
+      url: "https://a/",
+      title: "A",
+      pendingDialog: dialog,
+    });
+    expect(events.onTabRegistered).toHaveBeenCalledWith(9, dialog);
+    expect(peer.listTabs()[0]).not.toHaveProperty("pendingDialog");
+    socket.receive({ type: "registerTab", version: 1, tabId: 9, url: "https://a/", title: "A" });
+    expect(events.onTabRegistered).toHaveBeenLastCalledWith(9, undefined);
   });
 
   it("tracks tabs, updates titles on re-register, and keeps them sorted", async () => {

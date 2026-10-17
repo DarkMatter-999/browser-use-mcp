@@ -84,13 +84,16 @@ export async function evaluate(
 ): Promise<EvaluateOutcome> {
   const args = inputSchema.parse(input);
   requireTab(ctx, args.tabId);
-  const result = await runEvaluate(
-    ctx,
-    args.tabId,
-    args.expression,
-    args.awaitPromise,
-    args.timeoutMs,
-  );
+  let result: Awaited<ReturnType<typeof runEvaluate>>;
+  try {
+    result = await runEvaluate(ctx, args.tabId, args.expression, args.awaitPromise, args.timeoutMs);
+  } catch (error) {
+    // The extension refuses to send answers over the 2 MiB bridge limit; that is a large value.
+    if (error instanceof BrowserUseError && error.code === "LIMIT_EXCEEDED") {
+      return { value: OMITTED, truncated: true };
+    }
+    throw error;
+  }
   let truncated = false;
   let serialized: string | undefined;
   try {

@@ -3,7 +3,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ensureDaemon } from "../src/client/ensure-daemon";
+import { canConnect, ensureDaemon, restartDaemon } from "../src/client/ensure-daemon";
 import { resolvePaths } from "../src/config";
 import { IpcServer } from "../src/daemon/ipc-server";
 import { PairingCodes } from "../src/daemon/token-store";
@@ -94,5 +94,51 @@ describe("ensureDaemon", () => {
       code: "INTERNAL",
       hint: expect.stringContaining("daemon.log") as string,
     });
+  });
+});
+
+describe("restartDaemon", () => {
+  it("holds the start lock so an older client in the gap waits instead of spawning its own", async () => {
+    const old = await startInProcessDaemon("1.0.0", { closeOnShutdown: true });
+    const { paths } = old;
+    let replacement: Awaited<ReturnType<typeof startInProcessDaemon>> | undefined;
+    cleanups.push(async () => {
+      await replacement?.stop();
+      await old.stop();
+    });
+    const newSpawn = vi.fn(() => {
+      setTimeout(() => {
+        void startInProcessDaemon("2.0.0", { paths }).then((started) => {
+          replacement = started;
+        });
+      }, 300);
+    });
+    const oldSpawn = vi.fn();
+    let olderClient: Promise<void> | undefined;
+    await restartDaemon(
+      paths,
+      "new-entry.js",
+      async () => {
+        await old.server.close();
+        // The older MCP process reconnects right after its daemon went away.
+        olderClient = ensureDaemon(paths, "old-entry.js", { spawnDaemon: oldSpawn });
+        return true;
+      },
+      { spawnDaemon: newSpawn, clientVersion: "2.0.0" },
+    );
+    await olderClient;
+    expect(newSpawn).toHaveBeenCalledTimes(1);
+    expect(oldSpawn).not.toHaveBeenCalled();
+    expect(await canConnect(paths.ipcEndpoint)).toBe(true);
+    expect(replacement).toBeDefined();
+  });
+
+  it("leaves a daemon alone when it could not be asked to stop (another client replaced it)", async () => {
+    const running = await startInProcessDaemon("2.0.0");
+    cleanups.push(() => running.stop());
+    const spawnDaemon = vi.fn();
+    await restartDaemon(running.paths, "entry.js", () => Promise.resolve(false), { spawnDaemon });
+    expect(spawnDaemon).not.toHaveBeenCalled();
+    expect(running.shutdowns).toBe(0);
   });
 });

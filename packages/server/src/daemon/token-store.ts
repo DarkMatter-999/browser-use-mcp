@@ -1,12 +1,13 @@
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, readFile, writeFile } from "node:fs/promises";
 import type { Paths } from "../config";
+import { ensurePrivateHome } from "./private-home";
 
 const TOKEN_PATTERN = /^[0-9a-f]{64}$/;
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 async function writeToken(paths: Paths, token: string): Promise<void> {
-  await mkdir(paths.home, { recursive: true, mode: 0o700 });
+  await ensurePrivateHome(paths.home);
   await writeFile(paths.tokenFile, `${token}\n`, { mode: 0o600 });
   // chmod is a no-op for ACLs on Windows; the file lives in the user's private profile directory.
   await chmod(paths.tokenFile, 0o600).catch(() => undefined);

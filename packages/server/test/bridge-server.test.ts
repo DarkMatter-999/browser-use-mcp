@@ -23,7 +23,7 @@ async function freePort(): Promise<number> {
   });
 }
 
-async function start() {
+async function start(lines?: string[]) {
   const port = await freePort();
   const codes = new PairingCodes();
   const server = new BridgeServer({
@@ -35,6 +35,20 @@ async function start() {
       consumePairingCode: (code) => (codes.consume(code) ? TOKEN : undefined),
       limiter: new FailureLimiter(),
     },
+    ...(lines === undefined
+      ? {}
+      : {
+          log: {
+            info: (line: string) => {
+              lines.push(line);
+              return Promise.resolve();
+            },
+            error: (line: string) => {
+              lines.push(line);
+              return Promise.resolve();
+            },
+          },
+        }),
   });
   await server.start();
   servers.push(server);
@@ -116,6 +130,24 @@ describe("BridgeServer", () => {
     socket.send(JSON.stringify({ ...helloMessage(), token: "f".repeat(64) }));
     expect(await reply).toMatchObject({ error: { code: "NOT_PAIRED" } });
     expect(server.peer).toBeUndefined();
+  });
+
+  it("logs rejected upgrades and handshake denials, never the token", async () => {
+    const lines: string[] = [];
+    const { port } = await start(lines);
+    await expect(opened(connect(port, "https://evil.example"))).rejects.toThrow();
+    await expect(
+      opened(connect(port, undefined, { Host: `evil.example:${port}` })),
+    ).rejects.toThrow();
+    const socket = connect(port);
+    await opened(socket);
+    const reply = nextMessage(socket);
+    socket.send(JSON.stringify({ ...helloMessage(), token: "f".repeat(64) }));
+    await reply;
+    expect(lines[0]).toMatch(/upgrade rejected .*origin "https:\/\/evil\.example"/);
+    expect(lines[1]).toMatch(/upgrade rejected .*host "evil\.example:\d+"/);
+    expect(lines[2]).toMatch(/bridge peer :\d+: handshake denied \(NOT_PAIRED\)/);
+    expect(lines.join("\n")).not.toContain("f".repeat(64));
   });
 
   it("pairs with a code, then hello succeeds", async () => {

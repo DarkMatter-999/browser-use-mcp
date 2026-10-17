@@ -3,10 +3,10 @@ import { z } from "zod";
 import type { ToolContext } from "../mcp/context";
 import { defineTool } from "../mcp/define-tool";
 import { jsonResult } from "../mcp/format";
+import { OVERLAY_ATTRIBUTE, overlayHostBackendId, withoutOverlay } from "../pointer/overlay-filter";
 import { asObject, requireTab, tabIdField } from "./schema";
 
 const MAX_INSPECTION_JSON_BYTES = 1024 * 1024;
-const OVERLAY_ATTRIBUTE = "data-browser-use-overlay";
 
 const domShape = {
   tabId: tabIdField,
@@ -181,7 +181,25 @@ export async function accessibilitySnapshot(
   const args = tabInput.parse(input);
   requireTab(ctx, args.tabId);
   const response = asObject(await ctx.sendCommand(args.tabId, "Accessibility.getFullAXTree", {}));
-  const source = asArray(response.nodes).map(record);
+  const all = asArray(response.nodes).map(record);
+  const hostId = await overlayHostBackendId((method, params) =>
+    ctx.sendCommand(args.tabId, method, params),
+  );
+  const kept = new Set(
+    withoutOverlay(
+      all.map((node, index) => ({
+        nodeId: typeof node.nodeId === "string" ? node.nodeId : `#${index}`,
+        ...(typeof node.parentId === "string" ? { parentId: node.parentId } : {}),
+        childIds: asArray(node.childIds).filter((id): id is string => typeof id === "string"),
+        ...(typeof node.backendDOMNodeId === "number"
+          ? { backendDOMNodeId: node.backendDOMNodeId }
+          : {}),
+        index,
+      })),
+      hostId,
+    ).map((node) => node.index),
+  );
+  const source = all.filter((_node, index) => kept.has(index));
   const depths = new Map<string, number>();
   for (const node of source) {
     const id = capString(node.nodeId, 256);

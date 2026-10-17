@@ -1,4 +1,4 @@
-import { unlink } from "node:fs/promises";
+import { chmod, unlink } from "node:fs/promises";
 import net from "node:net";
 import {
   BrowserUseError,
@@ -14,6 +14,7 @@ import {
 } from "@browser-use/protocol";
 import { isPipe } from "../client/ensure-daemon";
 import type { BrowserBackend } from "./backend";
+import type { Logger } from "./log";
 import type { PairingCodes } from "./token-store";
 
 export interface DaemonDeps {
@@ -23,7 +24,13 @@ export interface DaemonDeps {
   port: number;
   rotateToken(): Promise<void>;
   onShutdown(): void;
+  /** Records dropped (malformed, oversize or pre-hello) IPC messages; never their content. */
+  log?: Logger;
+  /** Upper bound on how long `shutdown` waits for in-flight requests (default 30 s). */
+  drainTimeoutMs?: number;
 }
+
+const DEFAULT_DRAIN_TIMEOUT_MS = 30_000;
 
 function toJson(value: unknown): JsonValue {
   return jsonValueSchema.parse(JSON.parse(JSON.stringify(value ?? null)));
@@ -34,6 +41,8 @@ export class IpcServer {
   readonly #clients = new Set<net.Socket>();
   #server: net.Server | undefined;
   #endpoint: string | undefined;
+  #inFlight = 0;
+  #draining = false;
 
   constructor(deps: DaemonDeps) {
     this.#deps = deps;
@@ -43,6 +52,14 @@ export class IpcServer {
     return this.#clients.size;
   }
 
+  /**
+   * IPC trust model: the IPC protocol is unauthenticated. Any process that can connect may mint
+   * pairing codes and drive connected tabs, so access control is the filesystem: the socket lives
+   * in the 0700 state directory (see `ensurePrivateHome`) and is itself chmod 0600, which limits
+   * it to the daemon's own OS user. Processes running as that user are trusted (they could read
+   * the token file anyway). On Windows the named pipe keeps its default DACL; spec section 4.3
+   * records this as a known gap.
+   */
   async listen(endpoint: string): Promise<void> {
     this.#endpoint = endpoint;
     const server = net.createServer((socket) => {
@@ -56,6 +73,14 @@ export class IpcServer {
       });
     });
     this.#server = server;
+    if (!isPipe(endpoint)) {
+      try {
+        await chmod(endpoint, 0o600);
+      } catch (error) {
+        await this.close();
+        throw error;
+      }
+    }
   }
 
   async close(): Promise<void> {
@@ -71,6 +96,17 @@ export class IpcServer {
       );
     if (server && this.#endpoint && !isPipe(this.#endpoint)) {
       await unlink(this.#endpoint).catch(() => undefined);
+    }
+  }
+
+  async #drain(): Promise<void> {
+    this.#draining = true;
+    const deadline = Date.now() + (this.#deps.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS);
+    while (this.#inFlight > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    if (this.#inFlight > 0) {
+      void this.#deps.log?.error(`shutdown: ${this.#inFlight} request(s) still running; exiting`);
     }
   }
 
@@ -141,7 +177,16 @@ export class IpcServer {
         default:
           break;
       }
+      // Spec 4.4: a shutdown (version restart or `stop`) is graceful. It stops accepting new
+      // work, waits for in-flight requests (bounded), and only then answers and exits.
+      const counted = message.type !== "shutdown" && message.type !== "status";
+      if (counted) this.#inFlight += 1;
       try {
+        if (this.#draining && counted) {
+          throw new BrowserUseError("BRIDGE_DISCONNECTED", "The Browser Use daemon is restarting", {
+            hint: "Retry the call; the MCP server reconnects to the new daemon automatically.",
+          });
+        }
         let value: unknown;
         switch (message.type) {
           case "status":
@@ -179,6 +224,7 @@ export class IpcServer {
             value = true;
             break;
           case "shutdown":
+            await this.#drain();
             value = true;
             break;
         }
@@ -189,6 +235,8 @@ export class IpcServer {
           });
       } catch (error) {
         fail(message.id, error);
+      } finally {
+        if (counted) this.#inFlight -= 1;
       }
     };
 
@@ -201,10 +249,15 @@ export class IpcServer {
       }),
     );
 
+    const drop = (reason: string): void => {
+      void this.#deps.log?.error(`ipc client dropped: ${reason}`);
+      socket.destroy();
+    };
+
     socket.on("data", (chunk: string) => {
       buffer += chunk;
       if (buffer.length > MAX_IPC_MESSAGE_BYTES) {
-        socket.destroy();
+        drop("message exceeds the size limit");
         return;
       }
       let newline = buffer.indexOf("\n");
@@ -216,12 +269,12 @@ export class IpcServer {
         try {
           message = parseIpcClientMessage(line);
         } catch {
-          socket.destroy();
+          drop("malformed message");
           return;
         }
         if (!greeted) {
           if (message.type !== "hello") {
-            socket.destroy();
+            drop(`${message.type} before hello`);
             return;
           }
           greeted = true;

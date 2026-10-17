@@ -293,6 +293,10 @@ async function captureBody(
       bodyBytes: bytes.byteLength,
     };
   } catch (error) {
+    // The extension answers LIMIT_EXCEEDED for bodies too large for the bridge.
+    if (error instanceof BrowserUseError && error.code === "LIMIT_EXCEEDED") {
+      return { bodyTruncated: true };
+    }
     if (isUnsupported(error)) {
       throw new BrowserUseError(
         "UNSUPPORTED_CDP_METHOD",

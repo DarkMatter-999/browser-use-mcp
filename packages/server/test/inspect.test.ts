@@ -180,6 +180,39 @@ describe("browser inspection tools", () => {
     expect(JSON.stringify(ax)).not.toContain("private accessibility value");
   });
 
+  it("leaves the pointer overlay subtree out of the accessibility snapshot", async () => {
+    const ctx = scriptedContext(
+      {
+        "Accessibility.getFullAXTree": () => ({
+          nodes: [
+            { nodeId: "1", role: { value: "RootWebArea" }, childIds: ["2", "3"] },
+            { nodeId: "2", parentId: "1", role: { value: "button" }, name: { value: "Real" } },
+            {
+              nodeId: "3",
+              parentId: "1",
+              role: { value: "group" },
+              backendDOMNodeId: 900,
+              childIds: ["4"],
+            },
+            {
+              nodeId: "4",
+              parentId: "3",
+              role: { value: "StaticText" },
+              name: { value: "Click e3" },
+            },
+          ],
+        }),
+        "DOM.getDocument": () => ({ root: { nodeId: 1 } }),
+        "DOM.querySelector": () => ({ nodeId: 55 }),
+        "DOM.describeNode": () => ({ node: { backendNodeId: 900 } }),
+      },
+      tab,
+    );
+    const ax = await accessibilitySnapshot(ctx, { tabId: 5 });
+    expect(ax.nodes.map((node) => node.nodeId)).toEqual(["1", "2"]);
+    expect(JSON.stringify(ax)).not.toContain("Click e3");
+  });
+
   function queryHandlers(attributes: string[]): Record<string, () => unknown> {
     return {
       "DOM.getDocument": () => ({ root: { nodeId: 1 } }),

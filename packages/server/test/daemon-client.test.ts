@@ -98,6 +98,39 @@ describe("DaemonClient", () => {
     await replacement?.stop();
   });
 
+  it("re-checks the version on reconnect and replaces an older daemon started in the gap", async () => {
+    const first = await startInProcessDaemon("2.0.0");
+    daemon = first;
+    const { paths } = first;
+    let replacement: Daemon | undefined;
+    const spawnDaemon = vi.fn(() => {
+      void startInProcessDaemon("2.0.0", { paths }).then((started) => {
+        replacement = started;
+      });
+    });
+    client = await DaemonClient.connect({
+      paths,
+      clientVersion: "2.0.0",
+      entryScript: "x",
+      spawnDaemon,
+    });
+    expect(spawnDaemon).not.toHaveBeenCalled();
+    // The 2.0.0 daemon goes away and an older MCP process starts a 1.0.0 one.
+    await first.server.close();
+    await new Promise((r) => setTimeout(r, 50));
+    const stale = await startInProcessDaemon("1.0.0", { paths, closeOnShutdown: true });
+    try {
+      expect((await client.status()).daemonVersion).toBe("2.0.0");
+      expect(stale.shutdowns).toBe(1);
+      expect(spawnDaemon).toHaveBeenCalledTimes(1);
+    } finally {
+      client.close();
+      client = undefined;
+      await replacement?.stop();
+      await stale.stop();
+    }
+  });
+
   it("accepts a newer daemon without restarting it", async () => {
     daemon = await startInProcessDaemon("3.0.0");
     const spawnDaemon = vi.fn();

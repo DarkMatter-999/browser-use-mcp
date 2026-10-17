@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import net from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { startInProcessDaemon } from "./helpers/in-process-daemon";
@@ -38,6 +39,11 @@ function open(endpoint: string) {
 }
 
 describe("IpcServer", () => {
+  it.skipIf(process.platform === "win32")("creates the socket with mode 0600", async () => {
+    daemon = await startInProcessDaemon();
+    expect((await stat(daemon.paths.ipcEndpoint)).mode & 0o777).toBe(0o600);
+  });
+
   it("requires hello first and acks with the daemon version", async () => {
     daemon = await startInProcessDaemon("4.5.6");
     const c = open(daemon.paths.ipcEndpoint);
@@ -46,6 +52,92 @@ describe("IpcServer", () => {
       daemonVersion: "4.5.6",
       protocolVersion: 1,
     });
+    c.socket.destroy();
+  });
+
+  it("logs dropped malformed and pre-hello messages without their content", async () => {
+    const lines: string[] = [];
+    const record = (line: string) => {
+      lines.push(line);
+      return Promise.resolve();
+    };
+    daemon = await startInProcessDaemon("1.0.0", { log: { info: record, error: record } });
+    const early = open(daemon.paths.ipcEndpoint);
+    early.send({ type: "listTabs", id: 1 });
+    await new Promise((resolve) => early.socket.once("close", resolve));
+    const bad = open(daemon.paths.ipcEndpoint);
+    bad.socket.write('{"type":"hello","secret":"s3cr3t-value"\n');
+    await new Promise((resolve) => bad.socket.once("close", resolve));
+    expect(lines).toEqual([
+      "ipc client dropped: listTabs before hello",
+      "ipc client dropped: malformed message",
+    ]);
+  });
+
+  it("drains in-flight requests before answering shutdown and refuses new work meanwhile", async () => {
+    daemon = await startInProcessDaemon();
+    let finish!: () => void;
+    daemon.backend.sendCommand = () =>
+      new Promise((resolve) => {
+        finish = () => {
+          resolve({ done: true });
+        };
+      });
+    const worker = open(daemon.paths.ipcEndpoint);
+    worker.send({ type: "hello", protocolVersion: 1, clientVersion: "1" });
+    await worker.next((m) => m.type === "helloAck");
+    worker.send({
+      type: "sendCommand",
+      id: 1,
+      tabId: 1,
+      method: "Runtime.evaluate",
+      params: {},
+      timeoutMs: 5000,
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    const restarter = open(daemon.paths.ipcEndpoint);
+    restarter.send({ type: "hello", protocolVersion: 1, clientVersion: "2" });
+    await restarter.next((m) => m.type === "helloAck");
+    restarter.send({ type: "shutdown", id: 1 });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(daemon.shutdowns).toBe(0);
+    expect(restarter.lines.some((m) => m.type === "result")).toBe(false);
+    worker.send({ type: "listTabs", id: 2 });
+    expect(await worker.next((m) => m.id === 2)).toMatchObject({
+      type: "failure",
+      error: { code: "BRIDGE_DISCONNECTED" },
+    });
+    finish();
+    expect(await worker.next((m) => m.id === 1)).toMatchObject({
+      type: "result",
+      value: { done: true },
+    });
+    expect(await restarter.next((m) => m.id === 1)).toMatchObject({ type: "result", value: true });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(daemon.shutdowns).toBe(1);
+    worker.socket.destroy();
+    restarter.socket.destroy();
+  });
+
+  it("stops waiting for stuck requests after the drain timeout", async () => {
+    daemon = await startInProcessDaemon("1.0.0", { drainTimeoutMs: 150 });
+    daemon.backend.sendCommand = () => new Promise(() => undefined);
+    const c = open(daemon.paths.ipcEndpoint);
+    c.send({ type: "hello", protocolVersion: 1, clientVersion: "1" });
+    await c.next((m) => m.type === "helloAck");
+    c.send({
+      type: "sendCommand",
+      id: 1,
+      tabId: 1,
+      method: "Runtime.evaluate",
+      params: {},
+      timeoutMs: 5000,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    const started = Date.now();
+    c.send({ type: "shutdown", id: 2 });
+    expect(await c.next((m) => m.id === 2)).toMatchObject({ type: "result" });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(140);
     c.socket.destroy();
   });
 
@@ -150,6 +242,8 @@ describe("IpcServer", () => {
     expect((pair.value as { code: string }).code).toMatch(/^[A-Z2-9]{8}$/);
     await c.next((m) => m.id === 2);
     await c.next((m) => m.id === 3);
+    // shutdown answers after draining resetToken, then exits on the next turn of the loop.
+    await new Promise((resolve) => setImmediate(resolve));
     expect(daemon.rotations).toBe(1);
     expect(daemon.shutdowns).toBe(1);
     c.socket.destroy();

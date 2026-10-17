@@ -21,6 +21,11 @@ export class DialogTracker {
     return false;
   }
 
+  /** Seeds state the daemon missed, e.g. a dialog reported by `registerTab` after a reconnect. */
+  set(tabId: number, dialog: PendingDialog): void {
+    this.#byTab.set(tabId, dialog);
+  }
+
   get(tabId: number): PendingDialog | undefined {
     return this.#byTab.get(tabId);
   }

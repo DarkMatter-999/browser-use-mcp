@@ -9,6 +9,9 @@ describe("OVERLAY_SCRIPT", () => {
     expect(OVERLAY_SCRIPT).toContain("data-browser-use-overlay");
     expect(OVERLAY_SCRIPT).toContain('attachShadow({ mode: "closed" })');
     expect(OVERLAY_SCRIPT).toContain("showPopover");
+    // Out of the accessibility tree (no label text in snapshots) and never focusable.
+    expect(OVERLAY_SCRIPT).toContain('host.setAttribute("aria-hidden", "true")');
+    expect(OVERLAY_SCRIPT).toContain('host.setAttribute("inert", "")');
     expect(OVERLAY_SCRIPT).toMatch(/pointer-events:\s*none/);
   });
 

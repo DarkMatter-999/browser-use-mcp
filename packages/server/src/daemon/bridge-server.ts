@@ -3,6 +3,7 @@ import type { IncomingMessage } from "node:http";
 import { BrowserUseError, MAX_WIRE_MESSAGE_BYTES } from "@browser-use/protocol";
 import { type WebSocket, WebSocketServer } from "ws";
 import { ExtensionPeer, type PeerAuth, type PeerEvents } from "./extension-peer";
+import type { Logger } from "./log";
 
 const LOOPBACK_HOST = "127.0.0.1";
 
@@ -11,6 +12,13 @@ export interface BridgeServerOptions {
   extensionId: string;
   auth: PeerAuth;
   daemonVersion: string;
+  /** Records rejected upgrades, handshake denials and protocol errors (never tokens or codes). */
+  log?: Logger;
+}
+
+/** Header values are attacker-controlled: bound them and escape control characters for the log. */
+function printable(value: string | undefined): string {
+  return value === undefined ? "(none)" : JSON.stringify(value.slice(0, 200));
 }
 
 export class BridgeServer extends EventEmitter {
@@ -57,12 +65,23 @@ export class BridgeServer extends EventEmitter {
       host: LOOPBACK_HOST,
       port,
       maxPayload: MAX_WIRE_MESSAGE_BYTES,
-      verifyClient: (info: { origin: string; req: IncomingMessage }) =>
-        info.origin === `chrome-extension://${extensionId}` &&
-        info.req.headers.host === `${LOOPBACK_HOST}:${port}`,
+      verifyClient: (info: { origin: string; req: IncomingMessage }) => {
+        const originOk = info.origin === `chrome-extension://${extensionId}`;
+        const hostOk = info.req.headers.host === `${LOOPBACK_HOST}:${port}`;
+        if (!originOk || !hostOk) {
+          const reasons = [
+            ...(originOk ? [] : [`origin ${printable(info.origin)}`]),
+            ...(hostOk ? [] : [`host ${printable(info.req.headers.host)}`]),
+          ];
+          void this.#options.log?.error(
+            `bridge upgrade rejected from :${String(info.req.socket.remotePort)}: ${reasons.join(" ")}`,
+          );
+        }
+        return originOk && hostOk;
+      },
     });
-    server.on("connection", (socket) => {
-      this.#onConnection(socket);
+    server.on("connection", (socket, request) => {
+      this.#onConnection(socket, request.socket.remotePort);
     });
     try {
       await new Promise<void>((resolve, reject) => {
@@ -98,7 +117,7 @@ export class BridgeServer extends EventEmitter {
     });
   }
 
-  #onConnection(socket: WebSocket): void {
+  #onConnection(socket: WebSocket, remotePort?: number): void {
     const events: PeerEvents = {
       onReady: (peer) => {
         const previous = this.#peer;
@@ -114,11 +133,22 @@ export class BridgeServer extends EventEmitter {
         }
       },
       onTabsChanged: () => this.emit("tabsChanged"),
+      onTabRegistered: (tabId, pendingDialog) => this.emit("tabRegistered", tabId, pendingDialog),
       onTabRemoved: (tabId) => this.emit("tabRemoved", tabId),
       onTabEvent: (tabId, method, params) => this.emit("tabEvent", tabId, method, params),
       onDownload: (download) => this.emit("download", download),
     };
-    const peer = new ExtensionPeer(socket, this.#options.auth, events, this.#options.daemonVersion);
+    const { log } = this.#options;
+    const peer = new ExtensionPeer(
+      socket,
+      this.#options.auth,
+      events,
+      this.#options.daemonVersion,
+      {
+        ...(log === undefined ? {} : { log }),
+        label: `bridge peer :${String(remotePort)}`,
+      },
+    );
     this.#connections.add(peer);
   }
 }

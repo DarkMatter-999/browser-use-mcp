@@ -66,8 +66,21 @@ const bridge = new BridgeClient(
   },
 );
 
-const adapter = new DebuggerAdapter(chrome.debugger, (tabId) => {
-  controller.onExternalDetach(tabId);
+const adapter = new DebuggerAdapter(
+  chrome.debugger,
+  (tabId) => {
+    controller.onExternalDetach(tabId);
+  },
+  async (tabId) => ({
+    tabUrl: (await chrome.tabs.get(tabId)).url ?? "about:blank",
+    fileAccess: await chrome.extension.isAllowedFileSchemeAccess(),
+  }),
+);
+
+const SESSION_KEY = "connectedTabs";
+
+const downloads = trackDownloads(chrome.downloads, (message) => {
+  bridge.send(message);
 });
 
 const controller = new Controller({
@@ -81,6 +94,11 @@ const controller = new Controller({
   },
   isAllowedFileSchemeAccess: () => chrome.extension.isAllowedFileSchemeAccess(),
   addToGroup: (tabId) => addToBrowserUseGroup(groupApi, tabId),
+  downloads,
+  session: {
+    load: async () => (await chrome.storage.session.get(SESSION_KEY))[SESSION_KEY],
+    save: (tabs) => chrome.storage.session.set({ [SESSION_KEY]: tabs }),
+  },
 });
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
@@ -98,9 +116,12 @@ chrome.runtime.onMessage.addListener((message: PopupMessage, _sender, reply) => 
   void controller.onPopupMessage(message).then(reply);
   return true;
 });
-trackDownloads(chrome.downloads, (message) => {
-  bridge.send(message);
-});
-chrome.runtime.onStartup.addListener(() => void bridge.start());
-chrome.runtime.onInstalled.addListener(() => void bridge.start());
-void bridge.start();
+
+// Adopt tabs that survived a service-worker restart before the bridge re-registers tabs.
+const restored = controller.restore().catch(() => undefined);
+const start = (): void => {
+  void restored.then(() => bridge.start());
+};
+chrome.runtime.onStartup.addListener(start);
+chrome.runtime.onInstalled.addListener(start);
+start();

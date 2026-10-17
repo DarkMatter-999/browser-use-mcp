@@ -1,12 +1,16 @@
 import "./zod-jitless";
 import {
   BrowserUseError,
+  type ErrorPayload,
   jsonObjectSchema,
   type JsonValue,
   jsonValueSchema,
+  type PendingDialog,
   PROTOCOL_VERSION,
+  pendingDialogSchema,
   type WireMessage,
 } from "@browser-use/protocol";
+import { z } from "zod";
 import type { BridgeState } from "./bridge/client";
 import type { DebuggerAdapter } from "./cdp/debugger-adapter";
 import { targetTabIdForConnect } from "./tabs/connect-target";
@@ -27,7 +31,7 @@ export interface ControllerDeps {
     send(message: WireMessage): void;
     pair(code: string): Promise<void>;
   };
-  adapter: Pick<DebuggerAdapter, "attach" | "detach" | "sendCommand">;
+  adapter: Pick<DebuggerAdapter, "attach" | "detach" | "sendCommand" | "reattach">;
   tabs: {
     get(tabId: number): Promise<TabInfo>;
     create(properties: { url: string; active?: boolean; windowId?: number }): Promise<{
@@ -38,8 +42,29 @@ export interface ControllerDeps {
   };
   isAllowedFileSchemeAccess(): Promise<boolean>;
   addToGroup(tabId: number): Promise<void>;
+  /**
+   * Survives service-worker restarts (chrome.storage.session): which tabs are connected, whether
+   * the agent opened them, and any open dialog. `load` returns unvalidated stored data.
+   */
+  session?: { load(): Promise<unknown>; save(tabs: PersistedTab[]): Promise<void> };
+  /** Download correlation: only downloads a connected tab starts reach the daemon. */
+  downloads?: { expect(url: string): void };
   graceMs?: number;
 }
+
+export interface PersistedTab {
+  tabId: number;
+  auto: boolean;
+  dialog?: PendingDialog;
+}
+
+const persistedTabsSchema = z.array(
+  z.object({
+    tabId: z.number().int().positive(),
+    auto: z.boolean(),
+    dialog: pendingDialogSchema.optional(),
+  }),
+);
 
 export type PopupMessage =
   | { type: "get-status"; tabId?: number }
@@ -66,16 +91,64 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const MAX_ERROR_MESSAGE_CHARS = 4_000;
+
+/** A schema-valid error payload: the wire requires a non-empty message (Chrome can send ""). */
+function errorPayload(error: unknown): ErrorPayload {
+  const payload =
+    error instanceof BrowserUseError
+      ? error.toPayload()
+      : new BrowserUseError("INTERNAL", messageOf(error)).toPayload();
+  const text = payload.message.trim().slice(0, MAX_ERROR_MESSAGE_CHARS);
+  return { ...payload, message: text === "" ? "Chrome reported an error without a message" : text };
+}
+
 export class Controller {
   readonly #connected = new Set<number>();
   readonly #auto = new Set<number>();
   readonly #status = new TabStatus();
   readonly #lifecycle = new TabLifecycle();
   readonly #errors = new Map<number, string>();
+  readonly #dialogs = new Map<number, PendingDialog>();
+  #saving: Promise<void> = Promise.resolve();
   #bridgeDetail: string | undefined;
   #graceTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private readonly deps: ControllerDeps) {}
+
+  /**
+   * Run once when the service worker starts, before the bridge connects. MV3 can stop and
+   * restart the worker at any time; debugger sessions may outlive it. Tabs that were connected
+   * and are still attached are adopted again (spec section 10) and re-registered once the
+   * bridge is ready; stale entries are dropped.
+   */
+  async restore(): Promise<void> {
+    const session = this.deps.session;
+    if (!session) return;
+    let saved: PersistedTab[];
+    try {
+      const parsed = persistedTabsSchema.safeParse(await session.load());
+      saved = parsed.success ? parsed.data : [];
+    } catch {
+      return;
+    }
+    if (saved.length === 0) return;
+    let adopted: number[] = [];
+    try {
+      adopted = await this.deps.adapter.reattach(saved.map((entry) => entry.tabId));
+    } catch {
+      adopted = [];
+    }
+    for (const entry of saved) {
+      if (!adopted.includes(entry.tabId)) continue;
+      this.#connected.add(entry.tabId);
+      if (entry.auto) this.#auto.add(entry.tabId);
+      if (entry.dialog) this.#dialogs.set(entry.tabId, entry.dialog);
+      this.#status.set(entry.tabId, "connected");
+    }
+    this.#persist();
+    if (this.deps.bridge.state === "ready") await this.#reregisterAll();
+  }
 
   async onBridgeMessage(message: WireMessage): Promise<void> {
     switch (message.type) {
@@ -123,6 +196,10 @@ export class Controller {
 
   onDebuggerEvent(tabId: number, method: string, params: Record<string, unknown>): void {
     if (!this.#connected.has(tabId)) return;
+    if (method === "Page.downloadWillBegin" && typeof params.url === "string") {
+      this.deps.downloads?.expect(params.url);
+    }
+    this.#trackDialog(tabId, method, params);
     try {
       this.#send({
         type: "event",
@@ -225,11 +302,13 @@ export class Controller {
       try {
         await this.deps.adapter.attach(tabId);
         this.#connected.add(tabId);
+        this.#persist();
         await this.#register(tabId);
         this.#status.set(tabId, "connected");
       } catch (error) {
         this.#connected.delete(tabId);
         this.#auto.delete(tabId);
+        this.#persist();
         this.#status.set(tabId, "error");
         this.#errors.set(tabId, messageOf(error));
         await this.#safeDetach(tabId);
@@ -249,11 +328,13 @@ export class Controller {
         await this.deps.adapter.attach(tabId);
         this.#connected.add(tabId);
         this.#auto.add(tabId);
+        this.#persist();
         this.#status.set(tabId, "connected");
         await this.#register(tabId);
       } catch (error) {
         this.#connected.delete(tabId);
         this.#auto.delete(tabId);
+        this.#persist();
         this.#status.remove(tabId);
         await this.#safeDetach(tabId);
         try {
@@ -272,8 +353,40 @@ export class Controller {
     return { tabId };
   }
 
+  /** Mirrors the daemon's DialogTracker so registerTab can report a dialog it missed. */
+  #trackDialog(tabId: number, method: string, params: Record<string, unknown>): void {
+    if (method === "Page.javascriptDialogOpening") {
+      const parsed = pendingDialogSchema.safeParse({
+        type: params.type,
+        message: params.message ?? "",
+        url: params.url ?? "",
+        ...(typeof params.defaultPrompt === "string"
+          ? { defaultPrompt: params.defaultPrompt }
+          : {}),
+      });
+      if (parsed.success) {
+        this.#dialogs.set(tabId, parsed.data);
+        this.#persist();
+      }
+    } else if (method === "Page.javascriptDialogClosed" && this.#dialogs.delete(tabId)) {
+      this.#persist();
+    }
+  }
+
+  #persist(): void {
+    const session = this.deps.session;
+    if (!session) return;
+    const tabs: PersistedTab[] = [...this.#connected].map((tabId) => {
+      const dialog = this.#dialogs.get(tabId);
+      return { tabId, auto: this.#auto.has(tabId), ...(dialog ? { dialog } : {}) };
+    });
+    // Chained so writes land in order; a failed write must not block later ones.
+    this.#saving = this.#saving.then(() => session.save(tabs)).catch(() => undefined);
+  }
+
   async #register(tabId: number, known?: TabInfo): Promise<void> {
     const tab = known ?? (await this.deps.tabs.get(tabId));
+    const pendingDialog = this.#dialogs.get(tabId);
     this.#send({
       type: "registerTab",
       version: PROTOCOL_VERSION,
@@ -282,6 +395,7 @@ export class Controller {
       title: tab.title ?? "",
       ...(tab.active === undefined ? {} : { active: tab.active }),
       ...(this.#auto.has(tabId) ? { autoConnected: true } : {}),
+      ...(pendingDialog ? { pendingDialog } : {}),
     });
   }
 
@@ -306,6 +420,8 @@ export class Controller {
   async #disconnect(tabId: number, reason: string): Promise<void> {
     if (!this.#connected.delete(tabId)) return;
     this.#auto.delete(tabId);
+    this.#dialogs.delete(tabId);
+    this.#persist();
     this.#status.set(tabId, "disconnected");
     try {
       this.#send({ type: "unregisterTab", version: PROTOCOL_VERSION, tabId, reason });
@@ -339,19 +455,39 @@ export class Controller {
   }
 
   async #handle(requestId: string, work: () => Promise<unknown>): Promise<void> {
+    let message: WireMessage;
     try {
-      this.#safeSend({
+      message = {
         type: "response",
         version: PROTOCOL_VERSION,
         requestId,
         result: toJson(await work()),
-      });
+      };
     } catch (error) {
-      const payload =
-        error instanceof BrowserUseError
-          ? error.toPayload()
-          : new BrowserUseError("INTERNAL", messageOf(error)).toPayload();
-      this.#safeSend({ type: "error", version: PROTOCOL_VERSION, requestId, error: payload });
+      message = { type: "error", version: PROTOCOL_VERSION, requestId, error: errorPayload(error) };
+    }
+    try {
+      this.#send(message);
+    } catch (error) {
+      if (error instanceof BrowserUseError && error.code === "BRIDGE_DISCONNECTED") return;
+      // The answer could not be sent (over the 2 MiB limit, or not serialisable). Always answer
+      // so the daemon's request fails fast instead of waiting for its timeout.
+      const tooLarge = error instanceof BrowserUseError && error.code === "LIMIT_EXCEEDED";
+      this.#safeSend({
+        type: "error",
+        version: PROTOCOL_VERSION,
+        requestId,
+        error: tooLarge
+          ? {
+              code: "LIMIT_EXCEEDED",
+              message: "Response exceeds the 2 MiB bridge limit",
+              hint: "Ask for less data: a smaller page region, fewer nodes, or a narrower query.",
+            }
+          : {
+              code: "INTERNAL",
+              message: `Response could not be sent: ${messageOf(error).slice(0, 500)}`,
+            },
+      });
     }
   }
 

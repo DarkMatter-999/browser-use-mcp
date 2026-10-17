@@ -1,6 +1,6 @@
 import "../zod-jitless";
 import { BrowserUseError } from "@browser-use/protocol";
-import { isAllowedMethod, validateParams } from "./allowlist";
+import { isAllowedMethod, needsContext, type ValidationContext, validateParams } from "./allowlist";
 
 export interface DebuggerApi {
   attach(target: { tabId: number }, version: string): Promise<void>;
@@ -14,6 +14,7 @@ export interface DebuggerApi {
     addListener(listener: (source: { tabId?: number }) => void): void;
     removeListener(listener: (source: { tabId?: number }) => void): void;
   };
+  getTargets(): Promise<{ tabId?: number; attached: boolean }[]>;
 }
 
 const RESTRICTED_HINT =
@@ -28,9 +29,14 @@ export class DebuggerAdapter {
   private readonly listener: (source: { tabId?: number }) => void;
   private readonly api: DebuggerApi;
 
+  /**
+   * @param contextFor resolves the tab URL and file-access setting for URL-scoped methods
+   *   (Page.navigate, cookie methods). Without it those methods are refused (fail closed).
+   */
   constructor(
     api?: DebuggerApi,
     private readonly onExternalDetach: (tabId: number) => void = noop,
+    private readonly contextFor?: (tabId: number) => Promise<ValidationContext>,
   ) {
     this.api = api ?? chrome.debugger;
     this.listener = (source) => {
@@ -63,6 +69,34 @@ export class DebuggerAdapter {
     }
   }
 
+  /**
+   * After a service-worker restart, re-adopts debugger sessions that survived it: of `tabIds`
+   * (the tabs this extension had connected), those Chrome still reports as attached. Each one
+   * must answer Runtime.enable/Page.enable on this extension's session; a tab attached by
+   * someone else (DevTools) fails that and is skipped. Returns the adopted tab ids.
+   */
+  async reattach(tabIds: readonly number[]): Promise<number[]> {
+    const targets = await this.api.getTargets();
+    const live = new Set(targets.filter((target) => target.attached).map((target) => target.tabId));
+    const adopted: number[] = [];
+    for (const tabId of tabIds) {
+      if (!live.has(tabId)) continue;
+      if (this.attached.has(tabId)) {
+        adopted.push(tabId);
+        continue;
+      }
+      this.attached.add(tabId);
+      try {
+        await this.api.sendCommand({ tabId }, "Runtime.enable", {});
+        await this.api.sendCommand({ tabId }, "Page.enable", {});
+        adopted.push(tabId);
+      } catch {
+        this.attached.delete(tabId);
+      }
+    }
+    return adopted;
+  }
+
   async sendCommand(
     tabId: number,
     method: string,
@@ -74,7 +108,15 @@ export class DebuggerAdapter {
     if (!this.attached.has(tabId)) {
       throw new BrowserUseError("TAB_NOT_CONNECTED", `Tab ${tabId} is not attached`);
     }
-    const invalid = validateParams(method, params);
+    let context: ValidationContext | undefined;
+    if (needsContext(method) && this.contextFor) {
+      try {
+        context = await this.contextFor(tabId);
+      } catch (error) {
+        throw this.mapError(error);
+      }
+    }
+    const invalid = validateParams(method, params, context);
     if (invalid !== undefined) throw new BrowserUseError("INVALID_ARGUMENT", invalid);
     try {
       return await this.api.sendCommand({ tabId }, method, params);

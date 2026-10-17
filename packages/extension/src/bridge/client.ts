@@ -49,6 +49,8 @@ export class BridgeClient {
   #pingTimer: ReturnType<typeof setInterval> | undefined;
   #pongTimer: ReturnType<typeof setTimeout> | undefined;
   #terminal: "unpaired" | "version" | undefined;
+  /** Why the daemon refused the last handshake without revoking the pairing (throttle, timeout). */
+  #retryDetail: string | undefined;
 
   constructor(
     private readonly deps: BridgeClientDeps,
@@ -222,6 +224,15 @@ export class BridgeClient {
           this.#setState("unpaired", message.error.message);
           return;
         }
+        // Only NOT_PAIRED (a genuine token mismatch) erases the token. A throttled or timed-out
+        // handshake keeps it and retries with backoff when the daemon closes the socket.
+        if (
+          this.#state !== "ready" &&
+          (message.error.code === "LIMIT_EXCEEDED" || message.error.code === "TIMEOUT")
+        ) {
+          this.#retryDetail = message.error.message;
+          return;
+        }
         if (message.error.code === "VERSION_MISMATCH") {
           this.#terminal = "version";
           this.#setState("error", message.error.hint ?? message.error.message);
@@ -245,7 +256,9 @@ export class BridgeClient {
         ? VERSION_RETRY_MS
         : Math.min(1_000 * 2 ** this.#attempt, MAX_BACKOFF_MS);
     this.#attempt += 1;
-    if (this.#terminal !== "version") this.#setState("backoff");
+    const detail = this.#retryDetail;
+    this.#retryDetail = undefined;
+    if (this.#terminal !== "version") this.#setState("backoff", detail);
     this.#retryTimer = setTimeout(() => {
       this.#terminal = undefined;
       void this.#connect();

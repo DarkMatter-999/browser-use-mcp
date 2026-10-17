@@ -2,13 +2,16 @@ import { randomUUID } from "node:crypto";
 import {
   BrowserUseError,
   type ConnectedTab,
+  type ErrorCode,
   type JsonObject,
   type JsonValue,
+  type PendingDialog,
   PROTOCOL_VERSION,
   parseWireMessage,
   serializeWireMessage,
   type WireMessage,
 } from "@browser-use/protocol";
+import type { Logger } from "./log";
 import { PendingRequests } from "./pending-requests";
 
 export interface PeerSocket {
@@ -23,8 +26,14 @@ export interface PeerSocket {
 export interface PeerAuth {
   verifyToken(token: string): boolean;
   consumePairingCode(code: string): string | undefined;
+  /** Throttles pairing-code guesses (40-bit codes). Never applied to `hello`: see #onHandshakeMessage. */
   limiter: { blocked(): boolean; record(): void };
 }
+
+const NO_LOG: Logger = {
+  info: () => Promise.resolve(),
+  error: () => Promise.resolve(),
+};
 
 type DownloadMessage = Extract<WireMessage, { type: "download" }>;
 type RegisterTabMessage = Extract<WireMessage, { type: "registerTab" }>;
@@ -33,6 +42,11 @@ export interface PeerEvents {
   onReady(peer: ExtensionPeer): void;
   onClose(peer: ExtensionPeer): void;
   onTabsChanged(): void;
+  /**
+   * A tab was (re-)registered. `pendingDialog` is the extension's view of an open dialog, which
+   * the daemon may have missed while the bridge was down; undefined means none is open.
+   */
+  onTabRegistered?(tabId: number, pendingDialog: PendingDialog | undefined): void;
   onTabRemoved(tabId: number): void;
   onTabEvent(tabId: number, method: string, params: JsonObject): void;
   onDownload(download: DownloadMessage): void;
@@ -51,14 +65,23 @@ export class ExtensionPeer {
   #peerId: string | undefined;
   #handshakeTimer: ReturnType<typeof setTimeout>;
   #idleTimer: ReturnType<typeof setTimeout> | undefined;
+  readonly #log: Logger;
+  readonly #label: string;
 
+  /**
+   * @param label identifies the connection in log lines (for example the remote port). It must
+   *   never contain secrets: log lines carry reasons only, never tokens or pairing codes.
+   */
   constructor(
     socket: PeerSocket,
     private readonly auth: PeerAuth,
     private readonly events: PeerEvents,
     private readonly daemonVersion: string,
+    options: { log?: Logger; label?: string } = {},
   ) {
     this.#socket = socket;
+    this.#log = options.log ?? NO_LOG;
+    this.#label = options.label ?? "bridge peer";
     socket.on("message", (data) => {
       this.#onMessage(data);
     });
@@ -69,7 +92,7 @@ export class ExtensionPeer {
       this.#teardown("Extension bridge socket errored");
     });
     this.#handshakeTimer = setTimeout(() => {
-      this.#deny("Handshake timed out; open the Browser Use popup and reconnect.");
+      this.#deny("TIMEOUT", "Handshake timed out; open the Browser Use popup and reconnect.");
     }, HANDSHAKE_TIMEOUT_MS);
   }
 
@@ -219,7 +242,9 @@ export class ExtensionPeer {
       if (error instanceof BrowserUseError) {
         this.#trySend({ type: "error", version: PROTOCOL_VERSION, error: error.toPayload() });
       }
-      this.#protocolError("Invalid bridge message");
+      // Only the error code is logged: the raw message could carry a token or pairing code.
+      const code = error instanceof BrowserUseError ? error.code : "INTERNAL";
+      this.#protocolError(`Invalid bridge message (${code})`);
       return;
     }
     if (this.#idleTimer) this.#armIdle();
@@ -235,23 +260,35 @@ export class ExtensionPeer {
       this.#protocolError("Expected hello or pair before other bridge messages");
       return;
     }
-    if (this.auth.limiter.blocked()) {
-      this.#deny("Too many failed attempts. Wait a minute and try again.");
-      return;
-    }
     if (message.type === "pair") {
+      // The limiter exists to slow brute force of the 40-bit pairing code, so it gates `pair`
+      // only. A throttled pair is LIMIT_EXCEEDED (retry later), never NOT_PAIRED.
+      if (this.auth.limiter.blocked()) {
+        this.#deny(
+          "LIMIT_EXCEEDED",
+          "Too many failed pairing attempts. Wait a minute and try again.",
+        );
+        return;
+      }
       const token = this.auth.consumePairingCode(message.code);
       if (token === undefined) {
         this.auth.limiter.record();
-        this.#deny("Invalid or expired pairing code. Run `browseruse-mcp pair` for a new one.");
+        this.#deny(
+          "INVALID_ARGUMENT",
+          "Invalid or expired pairing code. Run `browseruse-mcp pair` for a new one.",
+        );
         return;
       }
+      void this.#log.info(`${this.#label}: pairing code accepted`);
       this.#send({ type: "paired", version: PROTOCOL_VERSION, token });
       return;
     }
+    // `hello` is never throttled: the 256-bit token cannot be brute forced and the comparison is
+    // constant time, so a local process spamming bad hellos cannot lock the real extension out.
+    // NOT_PAIRED is sent only for a genuine token mismatch; the extension erases its token on it.
     if (!this.auth.verifyToken(message.token)) {
-      this.auth.limiter.record();
       this.#deny(
+        "NOT_PAIRED",
         "Not paired. Run `browseruse-mcp pair` and enter the code in the extension popup.",
       );
       return;
@@ -315,8 +352,10 @@ export class ExtensionPeer {
       ...((autoConnected ?? previous?.autoConnected) === undefined
         ? {}
         : { autoConnected: autoConnected ?? previous?.autoConnected }),
-      ...(pendingDialog === undefined ? {} : { pendingDialog }),
     });
+    // Dialog state is owned by the backend's DialogTracker; it is not stored on the tab here,
+    // so a stale copy can never outlive Page.javascriptDialogClosed.
+    this.events.onTabRegistered?.(tabId, pendingDialog);
     this.events.onTabsChanged();
   }
 
@@ -355,17 +394,19 @@ export class ExtensionPeer {
     }
   }
 
-  #deny(reason: string): void {
+  #deny(code: ErrorCode, reason: string): void {
+    void this.#log.error(`${this.#label}: handshake denied (${code}): ${reason}`);
     this.#trySend({
       type: "error",
       version: PROTOCOL_VERSION,
-      error: { code: "NOT_PAIRED", message: reason },
+      error: { code, message: reason },
     });
     this.#teardown(reason);
     this.#socket.close(1008, "unauthorized");
   }
 
   #protocolError(reason: string): void {
+    void this.#log.error(`${this.#label}: protocol error, closing: ${reason}`);
     this.#teardown(reason);
     this.#socket.close(1002, reason);
   }

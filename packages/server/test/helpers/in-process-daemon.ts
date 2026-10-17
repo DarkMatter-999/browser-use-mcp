@@ -5,6 +5,7 @@ import type { ConnectedTab, DownloadInfo, JsonObject, JsonValue } from "@browser
 import { type Paths, resolvePaths } from "../../src/config";
 import type { BrowserBackend, CdpEventListener } from "../../src/daemon/backend";
 import { IpcServer } from "../../src/daemon/ipc-server";
+import type { Logger } from "../../src/daemon/log";
 import { PairingCodes } from "../../src/daemon/token-store";
 
 export class StubBackend implements BrowserBackend {
@@ -67,7 +68,7 @@ export class StubBackend implements BrowserBackend {
 
 export async function startInProcessDaemon(
   version = "1.0.0",
-  options: { paths?: Paths; closeOnShutdown?: boolean } = {},
+  options: { paths?: Paths; closeOnShutdown?: boolean; log?: Logger; drainTimeoutMs?: number } = {},
 ) {
   const ownsHome = options.paths === undefined;
   const home = options.paths?.home ?? (await mkdtemp(join(tmpdir(), "bu-")));
@@ -89,6 +90,8 @@ export async function startInProcessDaemon(
       shutdowns += 1;
       if (options.closeOnShutdown) void server.close();
     },
+    ...(options.log === undefined ? {} : { log: options.log }),
+    ...(options.drainTimeoutMs === undefined ? {} : { drainTimeoutMs: options.drainTimeoutMs }),
   });
   await mkdir(home, { recursive: true });
   await server.listen(paths.ipcEndpoint);

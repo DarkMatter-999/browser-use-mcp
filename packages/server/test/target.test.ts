@@ -49,6 +49,22 @@ describe("assertOneTarget", () => {
 });
 
 describe("resolveTarget by selector", () => {
+  it("never targets the pointer overlay host", async () => {
+    const ctx = ctxFor({
+      "DOM.querySelectorAll": () => ({ nodeIds: [7, 99] }),
+      "DOM.querySelector": (params) =>
+        params.selector === "[data-browser-use-overlay]" ? { nodeId: 99 } : { nodeId: 0 },
+    });
+    expect(await resolveTarget(ctx, 1, { selector: "html > div" })).toMatchObject({ nodeId: 7 });
+    const onlyOverlay = ctxFor({
+      "DOM.querySelectorAll": () => ({ nodeIds: [99] }),
+      "DOM.querySelector": () => ({ nodeId: 99 }),
+    });
+    await expect(
+      resolveTarget(onlyOverlay, 1, { selector: "html > div:last-child" }),
+    ).rejects.toMatchObject({ code: "ELEMENT_NOT_FOUND" });
+  });
+
   it("returns the centre of the element box and scrolls it into view first", async () => {
     const ctx = ctxFor();
     const target = await resolveTarget(ctx, 1, { selector: "#go" });

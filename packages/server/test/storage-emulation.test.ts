@@ -9,8 +9,12 @@ const tab = [{ tabId: 7, url: "https://example.test/path", title: "test" }];
 function context(extra: Record<string, (params: Record<string, unknown>) => unknown> = {}) {
   return scriptedContext(
     {
-      "Storage.getCookies": () => ({
-        cookies: [{ name: "a", value: "secret", domain: "example.test", path: "/" }],
+      "Network.getCookies": () => ({
+        cookies: [
+          { name: "a", value: "secret", domain: "example.test", path: "/" },
+          { name: "a", value: "secret", domain: "example.test", path: "/" },
+          { name: "b", value: "secret", domain: "example.test", path: "/other" },
+        ],
       }),
       "Network.deleteCookies": () => ({}),
       "Storage.setCookies": () => ({}),
@@ -41,6 +45,13 @@ describe("storage tools", () => {
       path: "/",
     });
     expect(JSON.stringify(result)).not.toContain("secret");
+    expect(result.cookies).toHaveLength(1);
+    expect(ctx.calls).toContainEqual({
+      tabId: 7,
+      method: "Network.getCookies",
+      params: { urls: ["https://example.test/", "http://example.test/"] },
+    });
+    expect(ctx.calls.some((call) => call.method === "Storage.getCookies")).toBe(false);
     await browserCookies(ctx, {
       tabId: 7,
       operation: "delete",

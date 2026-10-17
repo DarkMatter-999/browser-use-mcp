@@ -56,15 +56,33 @@ function matchingCookies(
   domain: string,
   path: string,
 ): Record<string, unknown>[] {
+  const seen = new Set<string>();
   return cookies
     .map(asObject)
-    .filter(
-      (cookie) =>
-        typeof cookie.domain === "string" &&
-        cookie.domain.replace(/^\./, "").toLowerCase() === domain &&
-        cookie.path === path,
-    )
+    .filter((cookie) => {
+      if (
+        typeof cookie.domain !== "string" ||
+        cookie.domain.replace(/^\./, "").toLowerCase() !== domain ||
+        cookie.path !== path
+      ) {
+        return false;
+      }
+      // The http and https lookups both return the non-secure cookies; keep one of each.
+      const key = JSON.stringify([cookie.name, cookie.domain, cookie.path]);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
     .slice(0, 100);
+}
+
+/**
+ * Cookies are read with Network.getCookies scoped to URLs on the requested domain and path.
+ * The extension only permits URLs on the connected tab's site, so the daemon never sees the
+ * whole cookie jar. Every cookie with exactly this domain and path is sent to one of the two.
+ */
+function cookieLookupUrls(domain: string, path: string): string[] {
+  return [`https://${domain}${path}`, `http://${domain}${path}`];
 }
 
 export async function browserCookies(
@@ -82,7 +100,11 @@ export async function browserCookies(
     });
   }
   if (args.operation === "get" || args.operation === "clear") {
-    const result = asObject(await ctx.sendCommand(args.tabId, "Storage.getCookies", {}));
+    const result = asObject(
+      await ctx.sendCommand(args.tabId, "Network.getCookies", {
+        urls: cookieLookupUrls(domain, args.path),
+      }),
+    );
     const matches = matchingCookies(
       Array.isArray(result.cookies) ? result.cookies : [],
       domain,

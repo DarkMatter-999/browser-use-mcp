@@ -158,6 +158,41 @@ describe("authentication failures", () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
+  const transient: ["LIMIT_EXCEEDED" | "TIMEOUT", string][] = [
+    ["LIMIT_EXCEEDED", "Too many failed pairing attempts."],
+    ["TIMEOUT", "Handshake timed out"],
+  ];
+  it.each(transient)(
+    "keeps the token and backs off on a %s handshake denial",
+    async (code, text) => {
+      const details: (string | undefined)[] = [];
+      FakeWebSocket.instances = [];
+      const store = new MemoryStore({ token: TOKEN, port: 40000 });
+      const client = new BridgeClient(
+        {
+          settings: new Settings(store),
+          createSocket: (url) => new FakeWebSocket(url),
+          extensionVersion: "0.0.0",
+        },
+        { onMessage: () => undefined, onState: (_state, detail) => details.push(detail) },
+      );
+      await client.start();
+      await flush();
+      const first = socketAt(0);
+      first.open();
+      first.receive({ type: "error", version: 1, error: { code, message: text } });
+      await flush();
+      first.close(1008);
+      expect(store.data.token).toBe(TOKEN);
+      expect(client.state).toBe("backoff");
+      expect(details.at(-1)).toBe(text);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(FakeWebSocket.instances).toHaveLength(2);
+      socketAt(1).open();
+      expect(socketAt(1).messages()[0]).toMatchObject({ type: "hello", token: TOKEN });
+    },
+  );
+
   it("reports VERSION_MISMATCH and waits 30 seconds before retrying", async () => {
     const { client, states } = setup();
     await client.start();

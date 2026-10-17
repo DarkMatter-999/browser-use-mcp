@@ -1,14 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
+import type { ValidationContext } from "../src/cdp/allowlist";
 import { DebuggerAdapter, type DebuggerApi } from "../src/cdp/debugger-adapter";
 
 type Detach = (source: { tabId?: number }) => void;
 
-function makeAdapter(onExternalDetach?: (tabId: number) => void) {
+function makeAdapter(
+  onExternalDetach?: (tabId: number) => void,
+  contextFor?: (tabId: number) => Promise<ValidationContext>,
+) {
   let listener: Detach | undefined;
   const api = {
     attach: vi.fn<DebuggerApi["attach"]>(() => Promise.resolve()),
     sendCommand: vi.fn<DebuggerApi["sendCommand"]>(() => Promise.resolve({})),
     detach: vi.fn<DebuggerApi["detach"]>(() => Promise.resolve()),
+    getTargets: vi.fn<DebuggerApi["getTargets"]>(() => Promise.resolve([])),
     onDetach: {
       addListener: vi.fn((fn: Detach) => {
         listener = fn;
@@ -16,12 +21,66 @@ function makeAdapter(onExternalDetach?: (tabId: number) => void) {
       removeListener: vi.fn(),
     },
   };
-  const adapter = new DebuggerAdapter(api, onExternalDetach);
+  const adapter = new DebuggerAdapter(api, onExternalDetach, contextFor);
   const fireDetach = (source: { tabId?: number }): void => listener?.(source);
   return { adapter, api, fireDetach };
 }
 
 describe("DebuggerAdapter", () => {
+  it("re-adopts only still-attached tabs after a restart without attaching again", async () => {
+    const { adapter, api } = makeAdapter();
+    api.getTargets.mockResolvedValueOnce([
+      { tabId: 4, attached: true },
+      { tabId: 5, attached: false },
+      { tabId: 6, attached: true },
+      { attached: true },
+    ]);
+    // Tab 6 is attached by someone else (DevTools): this extension's session cannot use it.
+    api.sendCommand.mockImplementation((target) =>
+      target.tabId === 6
+        ? Promise.reject(new Error("Debugger is not attached"))
+        : Promise.resolve({}),
+    );
+    expect(await adapter.reattach([4, 5, 6, 7])).toEqual([4]);
+    expect(api.attach).not.toHaveBeenCalled();
+    expect(api.sendCommand).toHaveBeenCalledWith({ tabId: 4 }, "Runtime.enable", {});
+    expect(api.sendCommand).toHaveBeenCalledWith({ tabId: 4 }, "Page.enable", {});
+    expect(adapter.attachedTabs()).toEqual([4]);
+    // A second connect of an adopted tab must not call chrome.debugger.attach again.
+    await adapter.attach(4);
+    expect(api.attach).not.toHaveBeenCalled();
+  });
+
+  it("validates URL-scoped methods against the tab's context and never calls Chrome on failure", async () => {
+    const contextFor = vi.fn(() =>
+      Promise.resolve({ tabUrl: "https://shop.example.com/cart", fileAccess: false }),
+    );
+    const { adapter, api } = makeAdapter(undefined, contextFor);
+    await adapter.attach(30);
+    api.sendCommand.mockClear();
+    await expect(
+      adapter.sendCommand(30, "Page.navigate", { url: "javascript:alert(1)" }),
+    ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    await expect(
+      adapter.sendCommand(30, "Network.getCookies", { urls: ["https://bank.test/"] }),
+    ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    expect(api.sendCommand).not.toHaveBeenCalled();
+    await adapter.sendCommand(30, "Network.getCookies", { urls: ["https://shop.example.com/"] });
+    expect(contextFor).toHaveBeenCalledWith(30);
+    expect(api.sendCommand).toHaveBeenCalledTimes(1);
+    contextFor.mockClear();
+    await adapter.sendCommand(30, "Runtime.evaluate", { expression: "1" });
+    expect(contextFor).not.toHaveBeenCalled();
+  });
+
+  it("refuses URL-scoped methods when no context resolver is configured", async () => {
+    const { adapter } = makeAdapter();
+    await adapter.attach(31);
+    await expect(
+      adapter.sendCommand(31, "Page.navigate", { url: "https://example.com/" }),
+    ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+  });
+
   it("attaches, enables Runtime and Page, and forwards allowed commands", async () => {
     const { adapter, api } = makeAdapter();
     await adapter.attach(12);

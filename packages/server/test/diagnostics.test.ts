@@ -1,3 +1,4 @@
+import { BrowserUseError } from "@browser-use/protocol";
 import { describe, expect, it } from "vitest";
 import { DiagnosticEventBuffer } from "../src/diagnostics/event-buffer";
 import {
@@ -79,6 +80,24 @@ describe("diagnostics tools", () => {
       tabId: 7,
       method: "Network.getResponseBody",
       params: { requestId: "r" },
+    });
+  });
+
+  it("marks a body refused by the bridge size limit as truncated", async () => {
+    const ctx = scriptedContext(
+      {
+        "Network.enable": () => ({}),
+        "Network.getResponseBody": () => {
+          throw new BrowserUseError("LIMIT_EXCEEDED", "Response exceeds the 2 MiB bridge limit");
+        },
+      },
+      tab,
+    );
+    await browserNetwork(ctx, { tabId: 7 });
+    ctx.emit(7, "Network.responseReceived", { requestId: "big", response: { status: 200 } });
+    const result = await browserNetwork(ctx, { tabId: 7, includeBodies: true });
+    expect(result.events.find((event) => event.type === "response")).toMatchObject({
+      bodyTruncated: true,
     });
   });
 
