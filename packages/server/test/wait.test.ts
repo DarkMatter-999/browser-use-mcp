@@ -1,5 +1,6 @@
 import type { DownloadInfo } from "@browser-use/protocol";
 import { describe, expect, it, vi } from "vitest";
+import { beginAction } from "../src/tools/action-summary";
 import { waitFor, waitTools } from "../src/tools/wait";
 import { makeContext, scriptedContext } from "./helpers/context";
 import { findTool, parseText } from "./helpers/tool";
@@ -195,6 +196,29 @@ describe("browser_wait download", () => {
       download: { filename: "/tmp/report.pdf", state: "complete" },
     });
     vi.useRealTimers();
+  });
+
+  it("finds a download that completed while the preceding click was settling, once", async () => {
+    let list: DownloadInfo[] = [];
+    const ctx = makeContext({ listTabs: () => tab, listDownloads: () => Promise.resolve(list) });
+    await beginAction(ctx, 1);
+    list = [
+      {
+        downloadId: 3,
+        filename: "/tmp/report.txt",
+        url: "u",
+        state: "complete",
+        bytesReceived: 9,
+        totalBytes: 9,
+        sequence: 2,
+      },
+    ];
+    await expect(waitFor(ctx, { tabId: 1, condition: "download" })).resolves.toMatchObject({
+      download: { downloadId: 3, state: "complete" },
+    });
+    await expect(
+      waitFor(ctx, { tabId: 1, condition: "download", timeoutMs: 300 }),
+    ).rejects.toMatchObject({ code: "TIMEOUT" });
   });
 
   it("fails when the awaited download is interrupted and times out otherwise", async () => {

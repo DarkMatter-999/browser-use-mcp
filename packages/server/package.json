@@ -21,6 +21,7 @@
   "devDependencies": {
     "@browser-use/protocol": "workspace:*",
     "@types/ws": "^8.18.2",
+    "playwright": "^1.64.1",
     "tsup": "^9.0.0"
   },
   "dependencies": {

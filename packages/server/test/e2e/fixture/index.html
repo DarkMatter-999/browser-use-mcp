@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>E2E fixture</title>
+  </head>
+  <body>
+    <h1>E2E fixture</h1>
+    <button
+      id="increment"
+      onclick="
+        document.getElementById('count').textContent = String(
+          Number(document.getElementById('count').textContent) + 1,
+        )
+      "
+    >
+      Increment
+    </button>
+    <span id="count">0</span>
+    <label>Email <input id="email" type="text" /></label>
+    <select id="color">
+      <option value="red">Red</option>
+      <option value="blue">Blue</option>
+    </select>
+    <input id="file" type="file" />
+    <button id="picker" onclick="document.getElementById('file2').click()">Pick a file</button>
+    <input id="file2" type="file" style="display: none" />
+    <a id="download" href="/download.txt" download>Download report</a>
+    <button id="alert" onclick="alert('hello from the page')">Alert</button>
+    <button id="arm" onclick="window.onbeforeunload = () => 'unsaved changes'">
+      Arm leave prompt
+    </button>
+    <iframe src="/frame.html" title="inner"></iframe>
+  </body>
+</html>

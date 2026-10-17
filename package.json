@@ -12,6 +12,7 @@
     "pair": "pnpm --filter browseruse-mcp build && node packages/server/dist/cli.js pair",
     "typecheck": "tsc -p tsconfig.json && pnpm -r typecheck",
     "test": "vitest run",
+    "test:e2e": "pnpm build && pnpm --filter browseruse-mcp exec vitest run --config vitest.e2e.config.ts",
     "lint": "eslint . && stylelint \"packages/**/*.css\" && prettier --check .",
     "lint:fix": "eslint . --fix && stylelint \"packages/**/*.css\" --fix && prettier --write .",
     "format": "prettier --write .",

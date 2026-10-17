@@ -96,6 +96,8 @@ export async function resolveTarget(
       }
     ).nodeIds;
   } catch (error) {
+    // Only Chrome's own rejection means a bad selector; transport and dialog errors pass through.
+    if (error instanceof BrowserUseError && error.code !== "INTERNAL") throw error;
     throw new BrowserUseError(
       "INVALID_ARGUMENT",
       `Invalid selector ${selector}: ${error instanceof Error ? error.message : String(error)}`,

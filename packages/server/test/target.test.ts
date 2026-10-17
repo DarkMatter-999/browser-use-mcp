@@ -1,3 +1,4 @@
+import { BrowserUseError } from "@browser-use/protocol";
 import { describe, expect, it } from "vitest";
 import { assertOneTarget, objectIdFor, resolveTarget } from "../src/refs/target";
 import { scriptedContext } from "./helpers/context";
@@ -79,6 +80,17 @@ describe("resolveTarget by selector", () => {
     });
     await expect(resolveTarget(ctx, 1, { selector: "[[" })).rejects.toMatchObject({
       code: "INVALID_ARGUMENT",
+    });
+  });
+
+  it("passes DIALOG_OPEN and other non-CDP errors through unchanged", async () => {
+    const ctx = ctxFor({
+      "DOM.getDocument": () => {
+        throw new BrowserUseError("DIALOG_OPEN", "A alert dialog is open");
+      },
+    });
+    await expect(resolveTarget(ctx, 1, { selector: "#a" })).rejects.toMatchObject({
+      code: "DIALOG_OPEN",
     });
   });
 

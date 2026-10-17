@@ -1,3 +1,4 @@
+import { BrowserUseError, type ConnectedTab } from "@browser-use/protocol";
 import { describe, expect, it } from "vitest";
 import { allTools } from "../src/tools";
 import {
@@ -111,6 +112,41 @@ describe("interaction with refs", () => {
     );
     await expect(browserHandleDialog(ctx, { tabId: 1, accept: true })).rejects.toMatchObject({
       code: "INVALID_ARGUMENT",
+    });
+  });
+});
+
+describe("actions that open a dialog", () => {
+  const dialog = { type: "alert" as const, message: "hi", url: "https://a/" };
+
+  it("reports the click as performed, with the dialog it opened", async () => {
+    let current: ConnectedTab[] = tabs;
+    const ctx = {
+      ...scriptedContext({
+        ...selectorBase,
+        "Input.dispatchMouseEvent": (params) => {
+          if (params.type !== "mouseReleased") return {};
+          current = [{ tabId: 1, url: "https://a/", title: "A", pendingDialog: dialog }];
+          throw new BrowserUseError("DIALOG_OPEN", "A alert dialog is open");
+        },
+      }),
+    };
+    ctx.listTabs = () => current;
+    const result = await browserClick(ctx, { tabId: 1, selector: "#alert" });
+    expect(result).toMatchObject({ performed: true, action: "click", dialog: { type: "alert" } });
+  });
+
+  it("still fails when the dialog was already open before the action", async () => {
+    const ctx = scriptedContext(
+      {
+        "DOM.getDocument": () => {
+          throw new BrowserUseError("DIALOG_OPEN", "A alert dialog is open");
+        },
+      },
+      [{ tabId: 1, url: "https://a/", title: "A", pendingDialog: dialog }],
+    );
+    await expect(browserClick(ctx, { tabId: 1, selector: "#a" })).rejects.toMatchObject({
+      code: "DIALOG_OPEN",
     });
   });
 });

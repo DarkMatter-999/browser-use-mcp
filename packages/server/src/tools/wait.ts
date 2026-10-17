@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { ToolContext } from "../mcp/context";
 import { defineTool } from "../mcp/define-tool";
 import { jsonResult } from "../mcp/format";
+import { advanceDownloadBaseline, downloadBaseline } from "./action-summary";
 import { asObject, requireTab, tabIdField } from "./schema";
 
 const LOAD_STATES = ["load", "domcontentloaded", "interactive", "complete"];
@@ -58,7 +59,9 @@ export async function waitFor(
   const deadline = start + timeoutMs;
   let baseline = 0;
   if (args.condition === "download") {
-    baseline = Math.max(0, ...(await ctx.listDownloads()).map((d) => d.sequence));
+    baseline =
+      downloadBaseline(ctx, args.tabId) ??
+      Math.max(0, ...(await ctx.listDownloads()).map((d) => d.sequence));
   }
   let eventSeen = false as boolean;
   const unsubscribe = ctx.subscribe(args.tabId, (method) => {
@@ -92,6 +95,7 @@ export async function waitFor(
           );
         }
         if (match) {
+          advanceDownloadBaseline(ctx, args.tabId, match.sequence);
           return {
             tabId: args.tabId,
             condition: args.condition,

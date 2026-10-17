@@ -98,16 +98,32 @@ async function pointTo(ctx: ToolContext, target: ResolvedTarget, label: string):
 async function acting(
   ctx: ToolContext,
   tabId: number,
+  action: string,
   perform: () => Promise<Result>,
 ): Promise<Result> {
   const marker = await beginAction(ctx, tabId);
-  const base = await perform();
+  const dialogBefore = ctx.listTabs().find((tab) => tab.tabId === tabId)?.pendingDialog;
+  let base: Result;
+  try {
+    base = await perform();
+  } catch (error) {
+    // The daemon fails in-flight commands when a dialog opens. If this action opened it, the
+    // action itself happened: report it with the dialog instead of failing.
+    if (
+      dialogBefore !== undefined ||
+      !(error instanceof BrowserUseError) ||
+      error.code !== "DIALOG_OPEN"
+    ) {
+      throw error;
+    }
+    base = { tabId, performed: true, action };
+  }
   return finishAction(ctx, tabId, base, marker);
 }
 
 export async function browserClick(ctx: ToolContext, input: z.input<typeof targetSchema>) {
   const args = targetSchema.parse(input);
-  return acting(ctx, args.tabId, async () => {
+  return acting(ctx, args.tabId, "click", async () => {
     const target = await resolveTarget(ctx, args.tabId, args);
     await chooserWatch.armFor(ctx, args.tabId).catch(() => undefined);
     await pointTo(ctx, target, `Click ${target.description}`);
@@ -119,7 +135,7 @@ export async function browserClick(ctx: ToolContext, input: z.input<typeof targe
 
 export async function browserType(ctx: ToolContext, input: z.input<typeof typeSchema>) {
   const args = typeSchema.parse(input);
-  return acting(ctx, args.tabId, async () => {
+  return acting(ctx, args.tabId, "type", async () => {
     const target = await resolveTarget(ctx, args.tabId, args);
     await pointTo(ctx, target, `Type into ${target.description}`);
     await mouse(ctx, args.tabId, "mousePressed", target.x, target.y);
@@ -135,7 +151,7 @@ async function setValue(
   kind: "fill" | "select",
 ): Promise<Result> {
   const args = valueSchema.parse(input);
-  return acting(ctx, args.tabId, async () => {
+  return acting(ctx, args.tabId, kind, async () => {
     const target = await resolveTarget(ctx, args.tabId, args);
     const objectId = await objectIdFor(ctx, target);
     const response = (await ctx.sendCommand(args.tabId, "Runtime.callFunctionOn", {
@@ -164,7 +180,7 @@ export const browserSelect = (ctx: ToolContext, input: z.input<typeof valueSchem
 
 export async function browserHover(ctx: ToolContext, input: z.input<typeof targetSchema>) {
   const args = targetSchema.parse(input);
-  return acting(ctx, args.tabId, async () => {
+  return acting(ctx, args.tabId, "hover", async () => {
     const target = await resolveTarget(ctx, args.tabId, args);
     await pointTo(ctx, target, `Hover ${target.description}`);
     await mouse(ctx, args.tabId, "mouseMoved", target.x, target.y);
@@ -174,7 +190,7 @@ export async function browserHover(ctx: ToolContext, input: z.input<typeof targe
 
 export async function browserFocus(ctx: ToolContext, input: z.input<typeof targetSchema>) {
   const args = targetSchema.parse(input);
-  return acting(ctx, args.tabId, async () => {
+  return acting(ctx, args.tabId, "focus", async () => {
     const target = await resolveTarget(ctx, args.tabId, args);
     await ctx.sendCommand(
       args.tabId,
@@ -189,7 +205,7 @@ export async function browserFocus(ctx: ToolContext, input: z.input<typeof targe
 
 export async function browserScroll(ctx: ToolContext, input: z.input<typeof scrollSchema>) {
   const args = scrollSchema.parse(input);
-  return acting(ctx, args.tabId, async () => {
+  return acting(ctx, args.tabId, "scroll", async () => {
     requireTab(ctx, args.tabId);
     let x = 0;
     let y = 0;
@@ -218,7 +234,7 @@ export async function browserScroll(ctx: ToolContext, input: z.input<typeof scro
 
 export async function browserPressKey(ctx: ToolContext, input: z.input<typeof keySchema>) {
   const args = keySchema.parse(input);
-  return acting(ctx, args.tabId, async () => {
+  return acting(ctx, args.tabId, "press_key", async () => {
     requireTab(ctx, args.tabId);
     const mask = args.modifiers.reduce((value, name) => value | MODIFIER_MASK[name], 0);
     await chooserWatch.armFor(ctx, args.tabId).catch(() => undefined);
@@ -238,7 +254,7 @@ export async function browserPressKey(ctx: ToolContext, input: z.input<typeof ke
 
 export async function browserDrag(ctx: ToolContext, input: z.input<typeof dragSchema>) {
   const args = dragSchema.parse(input);
-  return acting(ctx, args.tabId, async () => {
+  return acting(ctx, args.tabId, "drag", async () => {
     assertOneTarget(args.source, "source");
     assertOneTarget(args.destination, "destination");
     const from = await resolveTarget(ctx, args.tabId, args.source);
@@ -254,7 +270,7 @@ export async function browserDrag(ctx: ToolContext, input: z.input<typeof dragSc
 
 export async function browserHandleDialog(ctx: ToolContext, input: z.input<typeof dialogSchema>) {
   const args = dialogSchema.parse(input);
-  return acting(ctx, args.tabId, async () => {
+  return acting(ctx, args.tabId, "handle_dialog", async () => {
     requireTab(ctx, args.tabId);
     try {
       await ctx.sendCommand(args.tabId, "Page.handleJavaScriptDialog", {

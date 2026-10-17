@@ -47,7 +47,20 @@ describe("tab tools", () => {
         pendingDialog: { type: "alert" as const, message: "hi", url: "https://a/" },
       },
     ];
-    const ctx = makeContext({ listTabs: () => tabs });
+    const ctx = makeContext({
+      listTabs: () => [],
+      status: () =>
+        Promise.resolve({
+          daemonVersion: "1",
+          pid: 1,
+          port: 38241,
+          paired: true,
+          extensionConnected: true,
+          tabs,
+          mode: "extension" as const,
+        }),
+    });
+    // The daemon's answer wins over the (possibly stale) cached list.
     expect(parse(await tool("browser_tabs").run(ctx, {}))).toEqual(tabs);
   });
 

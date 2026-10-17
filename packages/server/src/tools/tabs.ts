@@ -21,7 +21,9 @@ export const tabTools = [
     description:
       "List the tabs Browser Use controls, with id, url, title and any pending JavaScript dialog.",
     inputShape: {},
-    handler: (ctx) => Promise.resolve(jsonResult(ctx.listTabs())),
+    // Ask the daemon rather than the cached list: the request reconnects (and autostarts the
+    // daemon) if it went away, so the answer reflects the current daemon, not a dead one.
+    handler: async (ctx) => jsonResult((await ctx.status()).tabs),
   }),
   defineTool({
     name: "browser_open_tab",
