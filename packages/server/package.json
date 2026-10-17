@@ -1,0 +1,24 @@
+{
+  "name": "@browser-use/mcp",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Browser Use MCP server",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "browser-use-mcp": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "tsup": "^9.0.0"
+  }
+}
