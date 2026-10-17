@@ -8,7 +8,27 @@
   <body>
     <main class="popup">
       <h1 class="popup-title">Browser Use</h1>
-      <p class="popup-status" data-status>Loading…</p>
+      <p id="headline" class="popup-status">Loading…</p>
+      <p id="detail" class="popup-detail" hidden></p>
+      <p id="error" class="error" role="alert" hidden></p>
+      <form id="pair-form" class="pair-form" hidden>
+        <label class="pair-label" for="code">Pairing code</label>
+        <input
+          id="code"
+          class="pair-input"
+          type="text"
+          maxlength="9"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="ABCD-2345"
+        />
+        <button type="submit" class="button button-primary">Pair</button>
+      </form>
+      <div class="actions">
+        <button id="connect" type="button" class="button button-primary">Connect this tab</button>
+        <button id="disconnect" type="button" class="button">Disconnect this tab</button>
+        <button id="disconnect-all" type="button" class="button">Disconnect all</button>
+      </div>
     </main>
     <script type="module" src="/src/popup/main.ts"></script>
   </body>

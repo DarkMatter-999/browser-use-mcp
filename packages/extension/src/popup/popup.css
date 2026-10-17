@@ -5,6 +5,8 @@
   --bu-fg: #1a1a1a;
   --bu-muted: #5f6368;
   --bu-accent: #1a73e8;
+  --bu-error: #d93025;
+  --bu-border: #dadce0;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -13,6 +15,8 @@
     --bu-fg: #e8eaed;
     --bu-muted: #9aa0a6;
     --bu-accent: #8ab4f8;
+    --bu-error: #f28b82;
+    --bu-border: #5f6368;
   }
 }
 
@@ -40,4 +44,71 @@ body {
 .popup-status {
   margin: 0;
   color: var(--bu-muted);
+}
+
+.popup-detail {
+  margin: 4px 0 0;
+  color: var(--bu-muted);
+  font-size: 13px;
+}
+
+.error {
+  margin: 8px 0 0;
+  color: var(--bu-error);
+  font-size: 13px;
+}
+
+.pair-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.pair-label {
+  color: var(--bu-muted);
+  font-size: 12px;
+}
+
+.pair-input {
+  padding: 6px 8px;
+  border: 1px solid var(--bu-border);
+  border-radius: 4px;
+  background: var(--bu-bg);
+  color: var(--bu-fg);
+  font: inherit;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.button {
+  padding: 7px 12px;
+  border: 1px solid var(--bu-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--bu-fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.button-primary {
+  border-color: var(--bu-accent);
+  background: var(--bu-accent);
+  color: var(--bu-bg);
+}
+
+.button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+[hidden] {
+  display: none !important;
 }
