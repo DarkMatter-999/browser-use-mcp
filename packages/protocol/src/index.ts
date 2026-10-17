@@ -1,4 +1,5 @@
 export * from "./errors";
+export * from "./ipc";
 export * from "./json";
 export * from "./parse";
 export * from "./version";
