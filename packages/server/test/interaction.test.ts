@@ -13,6 +13,7 @@ import {
   browserType,
   interactionTools,
 } from "../src/tools/interaction";
+import type { Pointer } from "../src/pointer/types";
 import { scriptedContext } from "./helpers/context";
 import { findTool, parseText } from "./helpers/tool";
 
@@ -31,7 +32,29 @@ const selectorBase = {
   "DOM.querySelectorAll": () => ({ nodeIds: [11] }),
 };
 
+function recordingPointer(): { pointer: Pointer; moves: [number, number, number][] } {
+  const moves: [number, number, number][] = [];
+  const pointer: Pointer = {
+    enabled: true,
+    ensureInstalled: () => Promise.resolve(),
+    moveTo: (tabId, x, y) => {
+      moves.push([tabId, x, y]);
+      return Promise.resolve();
+    },
+    hideForCapture: () => Promise.resolve(() => Promise.resolve()),
+  };
+  return { pointer, moves };
+}
+
 describe("interaction with refs", () => {
+  it("moves the agent pointer to the resolved centre before clicking", async () => {
+    const { pointer, moves } = recordingPointer();
+    const ctx = { ...scriptedContext(base, tabs), pointer };
+    ctx.refs.set(1, new Map([["e1", 77]]));
+    await browserClick(ctx, { tabId: 1, ref: "e1" });
+    expect(moves).toEqual([[1, 50, 25]]);
+  });
+
   it("clicks the centre of a ref'd element and reports where", async () => {
     const ctx = scriptedContext(base, tabs);
     ctx.refs.set(1, new Map([["e1", 77]]));

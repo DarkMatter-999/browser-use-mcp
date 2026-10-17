@@ -26,19 +26,27 @@ export async function screenshot(
 ): Promise<ScreenshotOutcome> {
   const args = inputSchema.parse(input);
   requireTab(ctx, args.tabId);
-  const result = asObject(
-    await ctx.sendCommand(
-      args.tabId,
-      "Page.captureScreenshot",
-      {
-        format: args.format,
-        ...(args.format === "jpeg" && args.quality !== undefined ? { quality: args.quality } : {}),
-        fromSurface: true,
-        captureBeyondViewport: false,
-      },
-      30_000,
-    ),
-  );
+  const restore = await ctx.pointer.hideForCapture(args.tabId);
+  let result: Record<string, unknown>;
+  try {
+    result = asObject(
+      await ctx.sendCommand(
+        args.tabId,
+        "Page.captureScreenshot",
+        {
+          format: args.format,
+          ...(args.format === "jpeg" && args.quality !== undefined
+            ? { quality: args.quality }
+            : {}),
+          fromSurface: true,
+          captureBeyondViewport: false,
+        },
+        30_000,
+      ),
+    );
+  } finally {
+    await restore();
+  }
   const data = typeof result.data === "string" ? result.data : "";
   const bytes = Buffer.from(data, "base64");
   if (!data || bytes.byteLength > MAX_SCREENSHOT_BYTES) {

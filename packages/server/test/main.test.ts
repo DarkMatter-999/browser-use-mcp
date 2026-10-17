@@ -15,8 +15,8 @@ describe("run", () => {
     expect(out.join("")).toBe(`${pkg.version}\n`);
   });
 
-  it("prints usage for --help, -h and no arguments", async () => {
-    const cases: string[][] = [["--help"], ["-h"], []];
+  it("prints usage for --help and -h", async () => {
+    const cases: string[][] = [["--help"], ["-h"]];
     for (const argv of cases) {
       const { io, out } = capture();
       expect(await run(argv, io)).toBe(0);
@@ -42,5 +42,26 @@ describe("run", () => {
     expect(out).toEqual([]);
     expect(err.join("")).toContain("Unknown argument: --bogus");
     expect(err.join("")).toContain("--help");
+  });
+
+  it("starts the MCP server when run with no arguments", async () => {
+    const { io, out } = capture();
+    let started = 0;
+    const startMcp = (): Promise<void> => {
+      started += 1;
+      return Promise.resolve();
+    };
+    expect(await run([], io, { startMcp })).toBe(0);
+    expect(started).toBe(1);
+    expect(out).toEqual([]);
+  });
+
+  it("reports a startup failure on stderr with exit code 1", async () => {
+    const { io, err } = capture();
+    const { BrowserUseError } = await import("@browser-use/protocol");
+    const startMcp = (): Promise<void> =>
+      Promise.reject(new BrowserUseError("INTERNAL", "no daemon", { hint: "run doctor" }));
+    expect(await run([], io, { startMcp })).toBe(1);
+    expect(err.join("")).toContain("browseruse-mcp failed: no daemon (run doctor)");
   });
 });

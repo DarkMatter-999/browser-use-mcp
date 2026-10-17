@@ -34,6 +34,46 @@ describe("screenshot", () => {
   });
 });
 
+describe("screenshot pointer hiding", () => {
+  it("hides the overlay, captures, then restores it (even on failure)", async () => {
+    const order: string[] = [];
+    const ctx = scriptedContext(
+      {
+        "Page.captureScreenshot": () => {
+          order.push("capture");
+          return { data: png };
+        },
+      },
+      tab,
+    );
+    const pointer = {
+      enabled: true,
+      ensureInstalled: () => Promise.resolve(),
+      moveTo: () => Promise.resolve(),
+      hideForCapture: () => {
+        order.push("hide");
+        return Promise.resolve(() => {
+          order.push("show");
+          return Promise.resolve();
+        });
+      },
+    };
+    await screenshot({ ...ctx, pointer }, { tabId: 1 });
+    expect(order).toEqual(["hide", "capture", "show"]);
+    order.length = 0;
+    const failing = scriptedContext(
+      {
+        "Page.captureScreenshot": () => {
+          throw new Error("boom");
+        },
+      },
+      tab,
+    );
+    await expect(screenshot({ ...failing, pointer }, { tabId: 1 })).rejects.toThrow("boom");
+    expect(order).toEqual(["hide", "show"]);
+  });
+});
+
 describe("screenshot tool", () => {
   const tool = findTool(screenshotTools, "browser_screenshot");
 

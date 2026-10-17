@@ -1,3 +1,4 @@
+import { BrowserUseError } from "@browser-use/protocol";
 import pkg from "../package.json" with { type: "json" };
 import { DaemonClient } from "./client/daemon-client";
 import type { Io } from "./commands/context";
@@ -15,13 +16,15 @@ export interface CliDeps {
   entryScript?: string;
   connect?: typeof DaemonClient.connect;
   runDaemon?: () => Promise<void>;
+  startMcp?: () => Promise<void>;
 }
 
 const HELP = `browseruse-mcp ${pkg.version}
 
-Usage: browseruse-mcp <command> [options]
+Usage: browseruse-mcp [command] [options]
 
 Commands:
+  mcp              Start the MCP server on stdio (default with no command)
   status [--json]  Show daemon, extension and tab status
   stop             Stop the background daemon
   pair [--reset]   Print a pairing code for the browser extension
@@ -42,6 +45,28 @@ export async function run(argv: string[], io: Io, deps: CliDeps = {}): Promise<n
   const ctx = { io, paths, env, entryScript, clientVersion: pkg.version, connect };
   switch (first) {
     case undefined:
+    case "mcp": {
+      try {
+        const start =
+          deps.startMcp ??
+          (async () => {
+            const { startMcpServer } = await import("./mcp/start");
+            await startMcpServer({
+              paths,
+              entryScript,
+              clientVersion: pkg.version,
+              env,
+            });
+          });
+        await start();
+        return 0;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const hint = error instanceof BrowserUseError ? error.hint : undefined;
+        io.err(`browseruse-mcp failed: ${message}${hint ? ` (${hint})` : ""}\n`);
+        return 1;
+      }
+    }
     case "--help":
     case "-h":
       io.out(HELP);
