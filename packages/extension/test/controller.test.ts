@@ -208,6 +208,25 @@ describe("bridge commands", () => {
     expect(sent[1]).toMatchObject({ error: { code: "INTERNAL", message: "boom" } });
   });
 
+  it("registers a still-loading new tab with its pending URL (Chrome reports url as an empty string)", async () => {
+    const { controller, tabs, sent } = setup();
+    tabs.get.mockResolvedValueOnce({
+      id: 50,
+      url: "",
+      pendingUrl: "https://example.com/",
+      title: "",
+    });
+    await controller.onBridgeMessage({
+      type: "openTab",
+      version: 1,
+      requestId: rid,
+      url: "https://example.com/",
+    });
+    expect(sent.find((m) => m.type === "registerTab")).toMatchObject({
+      url: "https://example.com/",
+    });
+  });
+
   it("opens a tab in the background, auto-connects it, groups it and replies with its id", async () => {
     const { controller, tabs, adapter, sent, addToGroup } = setup();
     await controller.onBridgeMessage({

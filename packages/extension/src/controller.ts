@@ -1,4 +1,5 @@
 import "./zod-jitless";
+import { resolveTabUrl } from "./shared/tab-url";
 import {
   BrowserUseError,
   type ErrorPayload,
@@ -20,6 +21,7 @@ import { type TabConnectionState, TabStatus } from "./tabs/status";
 export interface TabInfo {
   id?: number;
   url?: string;
+  pendingUrl?: string;
   title?: string;
   active?: boolean;
   windowId?: number;
@@ -391,7 +393,7 @@ export class Controller {
       type: "registerTab",
       version: PROTOCOL_VERSION,
       tabId,
-      url: tab.url ?? "about:blank",
+      url: resolveTabUrl(tab),
       title: tab.title ?? "",
       ...(tab.active === undefined ? {} : { active: tab.active }),
       ...(this.#auto.has(tabId) ? { autoConnected: true } : {}),

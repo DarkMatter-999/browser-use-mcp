@@ -1,4 +1,5 @@
 import "./zod-jitless";
+import { resolveTabUrl } from "./shared/tab-url";
 import { BridgeClient, type SocketLike } from "./bridge/client";
 import { Settings } from "./bridge/settings";
 import { DebuggerAdapter } from "./cdp/debugger-adapter";
@@ -66,13 +67,17 @@ const bridge = new BridgeClient(
   },
 );
 
+async function tabUrl(tabId: number): Promise<string> {
+  return resolveTabUrl(await chrome.tabs.get(tabId));
+}
+
 const adapter = new DebuggerAdapter(
   chrome.debugger,
   (tabId) => {
     controller.onExternalDetach(tabId);
   },
   async (tabId) => ({
-    tabUrl: (await chrome.tabs.get(tabId)).url ?? "about:blank",
+    tabUrl: await tabUrl(tabId),
     fileAccess: await chrome.extension.isAllowedFileSchemeAccess(),
   }),
 );
