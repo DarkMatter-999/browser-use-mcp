@@ -1,0 +1,43 @@
+:root {
+  color-scheme: light dark;
+
+  --bu-bg: #fff;
+  --bu-fg: #1a1a1a;
+  --bu-muted: #5f6368;
+  --bu-accent: #1a73e8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bu-bg: #202124;
+    --bu-fg: #e8eaed;
+    --bu-muted: #9aa0a6;
+    --bu-accent: #8ab4f8;
+  }
+}
+
+body {
+  min-width: 280px;
+  margin: 0;
+  background: var(--bu-bg);
+  color: var(--bu-fg);
+  font:
+    14px/1.4 system-ui,
+    sans-serif;
+}
+
+.popup {
+  padding: 16px;
+}
+
+.popup-title {
+  margin: 0 0 8px;
+  color: var(--bu-accent);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.popup-status {
+  margin: 0;
+  color: var(--bu-muted);
+}

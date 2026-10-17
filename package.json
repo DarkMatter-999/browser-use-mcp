@@ -11,8 +11,8 @@
     "build": "pnpm -r build",
     "typecheck": "tsc -p tsconfig.json && pnpm -r typecheck",
     "test": "vitest run",
-    "lint": "eslint . && stylelint \"packages/**/*.css\" --allow-empty-input && prettier --check .",
-    "lint:fix": "eslint . --fix && stylelint \"packages/**/*.css\" --allow-empty-input --fix && prettier --write .",
+    "lint": "eslint . && stylelint \"packages/**/*.css\" && prettier --check .",
+    "lint:fix": "eslint . --fix && stylelint \"packages/**/*.css\" --fix && prettier --write .",
     "format": "prettier --write .",
     "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build"
   },

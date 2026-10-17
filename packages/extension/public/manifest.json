@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Browser Use",
+  "version": "0.0.0",
+  "description": "Lets an AI agent control the browser tabs you explicitly connect.",
+  "minimum_chrome_version": "120",
+  "permissions": ["activeTab", "debugger", "downloads", "storage", "tabGroups", "tabs"],
+  "host_permissions": ["http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "Browser Use", "default_popup": "popup.html" }
+}
