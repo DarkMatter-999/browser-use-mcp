@@ -39,7 +39,7 @@ export class BridgeServer extends EventEmitter {
         "BRIDGE_DISCONNECTED",
         "The Browser Use extension is not connected",
         {
-          hint: "Run `browser-use-mcp doctor`. Make sure the extension is installed, paired, and its popup shows Connected.",
+          hint: "Run `browseruse-mcp doctor`. Make sure the extension is installed, paired, and its popup shows Connected.",
         },
       );
     }

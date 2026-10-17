@@ -93,7 +93,7 @@ export class BridgeClient {
     if (!CODE_PATTERN.test(code)) {
       throw new BrowserUseError(
         "INVALID_ARGUMENT",
-        "Enter the 8-character code printed by `browser-use-mcp pair`",
+        "Enter the 8-character code printed by `browseruse-mcp pair`",
       );
     }
     const port = await this.deps.settings.getPort();

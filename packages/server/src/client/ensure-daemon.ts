@@ -53,7 +53,7 @@ export async function ensureDaemon(
   const spawnDaemon = deps.spawnDaemon ?? defaultSpawn;
   const startupError = () =>
     new BrowserUseError("INTERNAL", "Could not start the Browser Use daemon", {
-      hint: `Check ${paths.logFile} for the reason (a busy port is the usual cause), then run \`browser-use-mcp doctor\`.`,
+      hint: `Check ${paths.logFile} for the reason (a busy port is the usual cause), then run \`browseruse-mcp doctor\`.`,
     });
 
   let lock: Awaited<ReturnType<typeof open>> | undefined;

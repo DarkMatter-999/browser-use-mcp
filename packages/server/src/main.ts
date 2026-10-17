@@ -17,9 +17,9 @@ export interface CliDeps {
   runDaemon?: () => Promise<void>;
 }
 
-const HELP = `browser-use-mcp ${pkg.version}
+const HELP = `browseruse-mcp ${pkg.version}
 
-Usage: browser-use-mcp <command> [options]
+Usage: browseruse-mcp <command> [options]
 
 Commands:
   status [--json]  Show daemon, extension and tab status
@@ -67,7 +67,7 @@ export async function run(argv: string[], io: Io, deps: CliDeps = {}): Promise<n
       io.err(
         first.startsWith("-") ? `Unknown argument: ${first}\n` : `Unknown command: ${first}\n`,
       );
-      io.err("Run browser-use-mcp --help for usage.\n");
+      io.err("Run browseruse-mcp --help for usage.\n");
       return 2;
   }
 }

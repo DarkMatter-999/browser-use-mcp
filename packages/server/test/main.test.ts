@@ -20,7 +20,7 @@ describe("run", () => {
     for (const argv of cases) {
       const { io, out } = capture();
       expect(await run(argv, io)).toBe(0);
-      expect(out.join("")).toContain("Usage: browser-use-mcp");
+      expect(out.join("")).toContain("Usage: browseruse-mcp");
     }
   });
 

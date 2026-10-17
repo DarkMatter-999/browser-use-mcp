@@ -27,9 +27,6 @@ function describeDetail(reply: PopupReply): string | undefined {
   if (reply.bridge === "backoff") {
     return "Start your MCP client (it launches the local server automatically).";
   }
-  if (reply.bridge === "unpaired") {
-    return "Run `browser-use-mcp pair` and enter the code below.";
-  }
   return reply.bridgeDetail;
 }
 

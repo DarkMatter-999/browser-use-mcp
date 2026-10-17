@@ -1,5 +1,5 @@
 {
-  "name": "@browser-use/mcp",
+  "name": "browseruse-mcp",
   "version": "0.0.0",
   "private": true,
   "description": "Browser Use MCP server",
@@ -8,7 +8,7 @@
     "node": ">=20"
   },
   "bin": {
-    "browser-use-mcp": "./dist/cli.js"
+    "browseruse-mcp": "./dist/cli.js"
   },
   "files": [
     "dist"

@@ -210,7 +210,7 @@ export class Controller {
     if (bridgeState !== "ready") {
       throw new BrowserUseError(
         "BRIDGE_DISCONNECTED",
-        "Start an MCP client or run `browser-use-mcp status`",
+        "Start an MCP client or run `browseruse-mcp status`",
       );
     }
     const [active] = await this.deps.tabs.query({ active: true, lastFocusedWindow: true });

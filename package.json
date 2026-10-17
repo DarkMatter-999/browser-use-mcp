@@ -9,6 +9,7 @@
   "scripts": {
     "prepare": "simple-git-hooks",
     "build": "pnpm -r build",
+    "pair": "pnpm --filter browseruse-mcp build && node packages/server/dist/cli.js pair",
     "typecheck": "tsc -p tsconfig.json && pnpm -r typecheck",
     "test": "vitest run",
     "lint": "eslint . && stylelint \"packages/**/*.css\" && prettier --check .",

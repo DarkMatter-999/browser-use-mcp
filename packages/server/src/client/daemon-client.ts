@@ -44,7 +44,7 @@ export function compareVersions(a: string, b: string): number {
 
 function notRunning(): BrowserUseError {
   return new BrowserUseError("BRIDGE_DISCONNECTED", "The Browser Use daemon is not running", {
-    hint: "It starts automatically when an MCP client connects. Run `browser-use-mcp doctor` for details.",
+    hint: "It starts automatically when an MCP client connects. Run `browseruse-mcp doctor` for details.",
   });
 }
 

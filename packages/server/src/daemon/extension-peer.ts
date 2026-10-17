@@ -176,7 +176,7 @@ export class ExtensionPeer {
         "BRIDGE_DISCONNECTED",
         "The Browser Use extension is not connected",
         {
-          hint: "Run `browser-use-mcp doctor`, then open the extension popup and make sure it is paired.",
+          hint: "Run `browseruse-mcp doctor`, then open the extension popup and make sure it is paired.",
         },
       );
     }
@@ -243,7 +243,7 @@ export class ExtensionPeer {
       const token = this.auth.consumePairingCode(message.code);
       if (token === undefined) {
         this.auth.limiter.record();
-        this.#deny("Invalid or expired pairing code. Run `browser-use-mcp pair` for a new one.");
+        this.#deny("Invalid or expired pairing code. Run `browseruse-mcp pair` for a new one.");
         return;
       }
       this.#send({ type: "paired", version: PROTOCOL_VERSION, token });
@@ -252,7 +252,7 @@ export class ExtensionPeer {
     if (!this.auth.verifyToken(message.token)) {
       this.auth.limiter.record();
       this.#deny(
-        "Not paired. Run `browser-use-mcp pair` and enter the code in the extension popup.",
+        "Not paired. Run `browseruse-mcp pair` and enter the code in the extension popup.",
       );
       return;
     }

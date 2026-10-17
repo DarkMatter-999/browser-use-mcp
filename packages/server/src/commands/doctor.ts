@@ -56,7 +56,7 @@ async function checkToken(ctx: CommandContext): Promise<Check> {
     level: "fail",
     name,
     detail: "token file is not 64 hex characters",
-    fix: "Run `browser-use-mcp pair --reset` to generate a new token.",
+    fix: "Run `browseruse-mcp pair --reset` to generate a new token.",
   };
 }
 
@@ -96,7 +96,7 @@ export async function runDoctor(ctx: CommandContext): Promise<number> {
             level: "warn",
             name: "extension",
             detail: "not connected",
-            fix: "Open the Browser Use extension popup and enter the code from `browser-use-mcp pair`.",
+            fix: "Open the Browser Use extension popup and enter the code from `browseruse-mcp pair`.",
           },
     );
   } else {
@@ -104,13 +104,13 @@ export async function runDoctor(ctx: CommandContext): Promise<number> {
       level: "warn",
       name: "daemon",
       detail: "not running",
-      fix: "It starts automatically when an MCP client connects, or run `browser-use-mcp pair`.",
+      fix: "It starts automatically when an MCP client connects, or run `browseruse-mcp pair`.",
     });
     checks.push({
       level: "warn",
       name: "extension",
       detail: "unknown (daemon not running)",
-      fix: "Start the daemon with `browser-use-mcp pair`, then pair the extension.",
+      fix: "Start the daemon with `browseruse-mcp pair`, then pair the extension.",
     });
   }
 
