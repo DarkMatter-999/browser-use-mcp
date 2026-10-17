@@ -95,6 +95,7 @@ const controller = new Controller({
     get: (tabId) => chrome.tabs.get(tabId),
     create: (properties) => chrome.tabs.create(properties),
     remove: (tabId) => chrome.tabs.remove(tabId),
+    update: (tabId, properties) => chrome.tabs.update(tabId, properties),
     query: (query) => chrome.tabs.query(query),
   },
   isAllowedFileSchemeAccess: () => chrome.extension.isAllowedFileSchemeAccess(),

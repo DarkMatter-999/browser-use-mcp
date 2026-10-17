@@ -40,6 +40,7 @@ function setup(state: BridgeState = "ready", overrides: Partial<ControllerDeps> 
     create: vi.fn(() => Promise.resolve({ id: 50 })),
     remove: vi.fn(() => Promise.resolve()),
     query: vi.fn(() => Promise.resolve([tabInfo(7)])),
+    update: vi.fn((id: number) => Promise.resolve(tabInfo(id))),
   };
   const addToGroup = vi.fn(() => Promise.resolve());
   const deps: ControllerDeps = {
@@ -110,6 +111,48 @@ describe("bridge commands", () => {
     ctx.sent.length = 0;
     return ctx;
   }
+
+  describe("input commands on background tabs", () => {
+    const cmd = (method: string): WireMessage => ({
+      type: "command",
+      version: 1,
+      requestId: rid,
+      tabId: 7,
+      method,
+      params: {},
+    });
+
+    it("activates an inactive tab before Input.dispatch* commands", async () => {
+      const { controller, adapter, tabs } = await connected();
+      tabs.get.mockResolvedValueOnce({ ...(await tabs.get(7)), active: false });
+      await controller.onBridgeMessage(cmd("Input.dispatchMouseEvent"));
+      expect(tabs.update).toHaveBeenCalledWith(7, { active: true });
+      expect(tabs.update.mock.invocationCallOrder[0]).toBeLessThan(
+        adapter.sendCommand.mock.invocationCallOrder[0] ?? 0,
+      );
+    });
+
+    it("does not update an already active tab", async () => {
+      const { controller, adapter, tabs } = await connected();
+      await controller.onBridgeMessage(cmd("Input.dispatchKeyEvent"));
+      expect(tabs.update).not.toHaveBeenCalled();
+      expect(adapter.sendCommand).toHaveBeenCalled();
+    });
+
+    it("never activates for non-input commands", async () => {
+      const { controller, tabs } = await connected();
+      tabs.get.mockResolvedValue({ ...(await tabs.get(7)), active: false });
+      await controller.onBridgeMessage(cmd("Runtime.evaluate"));
+      expect(tabs.update).not.toHaveBeenCalled();
+    });
+
+    it("still sends the command when activation fails", async () => {
+      const { controller, adapter, tabs } = await connected();
+      tabs.get.mockRejectedValueOnce(new Error("No tab with id"));
+      await controller.onBridgeMessage(cmd("Input.dispatchMouseEvent"));
+      expect(adapter.sendCommand).toHaveBeenCalled();
+    });
+  });
 
   it("runs allowed commands on connected tabs and responds", async () => {
     const { controller, adapter, sent } = await connected();

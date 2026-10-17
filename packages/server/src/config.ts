@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { posix, win32 } from "node:path";
 import { BrowserUseError, EXTENSION_ID } from "@browser-use/protocol";
 
 export const DEFAULT_BRIDGE_PORT = 38241;
@@ -17,6 +17,8 @@ export function resolvePaths(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): Paths {
+  // Pick the path flavour from the requested platform, not the host, so results are deterministic.
+  const { join } = platform === "win32" ? win32 : posix;
   const home = env.BROWSER_USE_HOME ?? join(homedir(), ".browser-use");
   const ipcEndpoint =
     platform === "win32"

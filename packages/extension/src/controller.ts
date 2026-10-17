@@ -40,6 +40,7 @@ export interface ControllerDeps {
       id?: number;
     }>;
     remove(tabId: number): Promise<void>;
+    update(tabId: number, properties: { active: true }): Promise<unknown>;
     query(query: { active: true; lastFocusedWindow: true }): Promise<TabInfo[]>;
   };
   isAllowedFileSchemeAccess(): Promise<boolean>;
@@ -152,11 +153,27 @@ export class Controller {
     if (this.deps.bridge.state === "ready") await this.#reregisterAll();
   }
 
+  /**
+   * CDP input events are ignored or hang in hidden tabs, so make the tab active in its window
+   * (without focusing the window). Failures fall through to the normal command error path.
+   */
+  async #activateForInput(tabId: number): Promise<void> {
+    try {
+      const tab = await this.deps.tabs.get(tabId);
+      if (!tab.active) await this.deps.tabs.update(tabId, { active: true });
+    } catch {
+      // the command itself will report a missing tab
+    }
+  }
+
   async onBridgeMessage(message: WireMessage): Promise<void> {
     switch (message.type) {
       case "command":
         return this.#handle(message.requestId, async () => {
           this.#requireConnected(message.tabId);
+          if (message.method.startsWith("Input.dispatch")) {
+            await this.#activateForInput(message.tabId);
+          }
           return this.deps.adapter.sendCommand(message.tabId, message.method, message.params);
         });
       case "openTab":
