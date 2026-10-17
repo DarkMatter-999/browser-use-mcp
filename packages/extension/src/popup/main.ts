@@ -25,6 +25,7 @@ const codeInput = field("code", HTMLInputElement);
 const connectButton = field("connect", HTMLButtonElement);
 const disconnectButton = field("disconnect", HTMLButtonElement);
 const disconnectAllButton = field("disconnect-all", HTMLButtonElement);
+const alwaysConnectedToggle = field("always-connected", HTMLInputElement);
 
 let activeTabId: number | undefined;
 
@@ -40,6 +41,7 @@ function setText(node: HTMLElement, text: string | undefined): void {
 function render(reply: PopupReply): void {
   const view = describeStatus(reply);
   headline.textContent = view.headline;
+  headline.dataset.tone = view.tone;
   setText(detail, view.detail);
   setText(errorBox, view.error);
   pairForm.hidden = !view.showPair;
@@ -49,6 +51,7 @@ function render(reply: PopupReply): void {
   connectButton.disabled = !view.canConnect;
   disconnectButton.disabled = !view.canDisconnect;
   disconnectAllButton.disabled = !view.canDisconnectAll;
+  alwaysConnectedToggle.checked = view.alwaysConnected;
 }
 
 async function refresh(): Promise<void> {
@@ -79,6 +82,9 @@ disconnectButton.addEventListener("click", () => {
   if (activeTabId !== undefined) void act({ type: "disconnect-tab", tabId: activeTabId });
 });
 disconnectAllButton.addEventListener("click", () => void act({ type: "disconnect-all" }));
+alwaysConnectedToggle.addEventListener("change", () => {
+  void act({ type: "set-always-connected", value: alwaysConnectedToggle.checked });
+});
 pairForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void act({ type: "pair", code: codeInput.value }).then(() => {

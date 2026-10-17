@@ -158,6 +158,27 @@ describe("handshake", () => {
     expect(socket.closeCode).toBe(1002);
   });
 
+  it("refuses a valid hello with BRIDGE_IN_USE when not admitted, without throttling", () => {
+    const { socket, peer, events, limiter } = setup();
+    const admit = vi.fn(() => false);
+    Object.assign(events, { admit });
+    socket.receive(hello());
+    expect(admit).toHaveBeenCalledWith(peer);
+    expect(peer.isReady).toBe(false);
+    expect(events.onReady).not.toHaveBeenCalled();
+    expect(socket.last()).toMatchObject({ type: "error", error: { code: "BRIDGE_IN_USE" } });
+    expect(socket.closeCode).toBe(1008);
+    expect(limiter.blocked()).toBe(false);
+  });
+
+  it("tracks how long the ready extension has been silent", async () => {
+    const { socket, peer } = await ready();
+    vi.advanceTimersByTime(25_000);
+    expect(peer.silentForMs).toBeGreaterThanOrEqual(25_000);
+    socket.receive({ type: "ping", version: 1 });
+    expect(peer.silentForMs).toBe(0);
+  });
+
   it("closes the socket with TIMEOUT if the handshake does not finish in 10 s", () => {
     const { socket } = setup();
     vi.advanceTimersByTime(10_001);

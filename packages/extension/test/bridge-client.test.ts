@@ -289,3 +289,165 @@ describe("send", () => {
     }).toThrow(expect.objectContaining({ code: "LIMIT_EXCEEDED" }));
   });
 });
+
+describe("explicit connection model", () => {
+  it("init reports off with a token and unpaired without one, opening no socket", async () => {
+    const paired = setup();
+    await paired.client.init();
+    expect(paired.client.state).toBe("off");
+    const unpaired = setup({});
+    await unpaired.client.init();
+    expect(unpaired.client.state).toBe("unpaired");
+    expect(FakeWebSocket.instances).toHaveLength(0);
+  });
+
+  it("stop closes the socket and cancels the heartbeat", async () => {
+    const { client, socket } = await ready();
+    client.stop();
+    expect(socket.closeCode).toBe(1000);
+    expect(client.state).toBe("off");
+    expect(client.running).toBe(false);
+    const sentBefore = socket.sent.length;
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(socket.sent).toHaveLength(sentBefore);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("stop cancels a pending reconnect", async () => {
+    const { client } = setup();
+    await client.start();
+    await flush();
+    socketAt(0).close();
+    expect(client.state).toBe("backoff");
+    client.stop();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("start during backoff retries immediately and opens only one socket", async () => {
+    const { client } = setup();
+    await client.start();
+    await flush();
+    socketAt(0).close();
+    await Promise.all([client.start(), client.start()]);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(client.state).toBe("connecting");
+  });
+
+  it("waitForReady resolves with the outcome of the attempt or after the timeout", async () => {
+    const { client } = setup();
+    await client.start();
+    const first = client.waitForReady(5_000);
+    socketAt(0).open();
+    socketAt(0).receive({ type: "helloAck", version: 1, daemonVersion: "1" });
+    await expect(first).resolves.toBe("ready");
+    await expect(client.waitForReady(5_000)).resolves.toBe("ready");
+    socketAt(0).close();
+    await vi.advanceTimersByTimeAsync(1_000);
+    const unreachable = client.waitForReady(5_000);
+    socketAt(1).close();
+    await expect(unreachable).resolves.toBe("backoff");
+    await vi.advanceTimersByTimeAsync(2_000);
+    const silent = client.waitForReady(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(silent).resolves.toBe("connecting");
+  });
+
+  it("pairing while no connection is wanted closes the pairing socket and stays off", async () => {
+    const { client, store } = setup({});
+    await client.init();
+    const paired = client.pair("ABCD2345");
+    await flush();
+    const pairing = socketAt(0);
+    pairing.open();
+    pairing.receive({ type: "paired", version: 1, token: TOKEN });
+    await paired;
+    expect(store.data.token).toBe(TOKEN);
+    expect(pairing.readyState).toBe(3);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(client.state).toBe("off");
+  });
+});
+
+describe("another browser holds the daemon (BRIDGE_IN_USE)", () => {
+  async function refused() {
+    const ctx = setup();
+    const details: (string | undefined)[] = [];
+    const client = new BridgeClient(
+      {
+        settings: new Settings(ctx.store),
+        createSocket: (url) => new FakeWebSocket(url),
+        extensionVersion: "0.0.0",
+      },
+      {
+        onMessage: () => undefined,
+        onState: (state, detail) => {
+          ctx.states.push(state);
+          details.push(detail);
+        },
+      },
+    );
+    await client.start();
+    await flush();
+    const first = socketAt(0);
+    first.open();
+    first.receive({
+      type: "error",
+      version: 1,
+      error: { code: "BRIDGE_IN_USE", message: "Another browser is already connected." },
+    });
+    await flush();
+    first.close(1008);
+    return { ...ctx, client, details };
+  }
+
+  it("keeps the token and reports inUse with the daemon's message", async () => {
+    const { client, store, details } = await refused();
+    expect(store.data.token).toBe(TOKEN);
+    expect(client.state).toBe("inUse");
+    expect(details.at(-1)).toBe("Another browser is already connected.");
+  });
+
+  it("retries only after 30 seconds, every time, without flapping through connecting", async () => {
+    const { client, states } = await refused();
+    for (let round = 1; round <= 3; round += 1) {
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(FakeWebSocket.instances).toHaveLength(round);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(FakeWebSocket.instances).toHaveLength(round + 1);
+      const retry = socketAt(-1);
+      retry.open();
+      expect(retry.messages()[0]).toMatchObject({ type: "hello", token: TOKEN });
+      retry.receive({
+        type: "error",
+        version: 1,
+        error: { code: "BRIDGE_IN_USE", message: "Another browser is already connected." },
+      });
+      await flush();
+      retry.close(1008);
+      expect(client.state).toBe("inUse");
+    }
+    const afterFirstRefusal = states.slice(states.indexOf("inUse"));
+    expect(afterFirstRefusal.every((state) => state === "inUse")).toBe(true);
+  });
+
+  it("becomes ready once the other browser lets go", async () => {
+    const { client } = await refused();
+    await vi.advanceTimersByTimeAsync(30_000);
+    const retry = socketAt(-1);
+    retry.open();
+    retry.receive({ type: "helloAck", version: 1, daemonVersion: "1" });
+    await flush();
+    expect(client.state).toBe("ready");
+  });
+
+  it("stop while in use cancels the slow retry", async () => {
+    const { client } = await refused();
+    client.stop();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(client.state).toBe("off");
+  });
+});

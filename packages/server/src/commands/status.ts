@@ -20,7 +20,11 @@ export async function runStatus(ctx: CommandContext, args: string[]): Promise<nu
     }
     const lines = [
       `Daemon: running (v${status.daemonVersion}, pid ${status.pid})`,
-      `Extension: ${status.extensionConnected ? "connected" : "not connected"}`,
+      `Extension: ${
+        status.extensionConnected
+          ? "connected"
+          : 'not connected (it connects while a tab is connected, or always with "Let the agent open tabs" on)'
+      }`,
       `Tabs: ${status.tabs.length}`,
       ...status.tabs.map((tab) => `  ${tab.tabId}  ${tab.title}  ${tab.url}`),
     ];

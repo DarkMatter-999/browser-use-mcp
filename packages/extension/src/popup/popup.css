@@ -6,6 +6,8 @@
   --bu-muted: #5f6368;
   --bu-accent: #1a73e8;
   --bu-error: #d93025;
+  --bu-ok: #188038;
+  --bu-warn: #b06000;
   --bu-border: #dadce0;
 }
 
@@ -16,6 +18,8 @@
     --bu-muted: #9aa0a6;
     --bu-accent: #8ab4f8;
     --bu-error: #f28b82;
+    --bu-ok: #81c995;
+    --bu-warn: #fdd663;
     --bu-border: #5f6368;
   }
 }
@@ -44,6 +48,18 @@ body {
 .popup-status {
   margin: 0;
   color: var(--bu-muted);
+}
+
+.popup-status[data-tone="ok"] {
+  color: var(--bu-ok);
+}
+
+.popup-status[data-tone="warn"] {
+  color: var(--bu-warn);
+}
+
+.popup-status[data-tone="error"] {
+  color: var(--bu-error);
 }
 
 .popup-detail {
@@ -107,6 +123,36 @@ body {
 .button:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+.settings {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--bu-border);
+}
+
+.settings-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.setting {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.setting-input {
+  margin: 0;
+  accent-color: var(--bu-accent);
+}
+
+.setting-help {
+  margin: 4px 0 0;
+  color: var(--bu-muted);
+  font-size: 12px;
 }
 
 [hidden] {

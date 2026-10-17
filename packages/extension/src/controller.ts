@@ -30,8 +30,18 @@ export interface TabInfo {
 export interface ControllerDeps {
   bridge: {
     readonly state: BridgeState;
+    /** Whether the bridge currently wants a connection (started and not stopped). */
+    readonly running: boolean;
     send(message: WireMessage): void;
     pair(code: string): Promise<void>;
+    start(): Promise<void>;
+    stop(): void;
+    waitForReady(timeoutMs: number): Promise<BridgeState>;
+  };
+  /** The "Let the agent open tabs (keep connected)" setting in chrome.storage.local. */
+  preferences?: {
+    getAlwaysConnected(): Promise<boolean>;
+    setAlwaysConnected(value: boolean): Promise<void>;
   };
   adapter: Pick<DebuggerAdapter, "attach" | "detach" | "sendCommand" | "reattach">;
   tabs: {
@@ -74,7 +84,8 @@ export type PopupMessage =
   | { type: "connect-active-tab" }
   | { type: "disconnect-tab"; tabId: number }
   | { type: "disconnect-all" }
-  | { type: "pair"; code: string };
+  | { type: "pair"; code: string }
+  | { type: "set-always-connected"; value: boolean };
 
 export interface PopupReply {
   bridge: BridgeState;
@@ -82,9 +93,12 @@ export interface PopupReply {
   state: TabConnectionState;
   error?: string;
   connectedCount: number;
+  alwaysConnected: boolean;
 }
 
 const DEFAULT_GRACE_MS = 5 * 60_000;
+/** How long Connect waits for the bridge to come up before reporting it unreachable. */
+const CONNECT_WAIT_MS = 10_000;
 
 function toJson(value: unknown): JsonValue {
   return jsonValueSchema.parse(JSON.parse(JSON.stringify(value ?? null)));
@@ -116,8 +130,48 @@ export class Controller {
   #saving: Promise<void> = Promise.resolve();
   #bridgeDetail: string | undefined;
   #graceTimer: ReturnType<typeof setTimeout> | undefined;
+  #alwaysConnected = false;
+  /** Connect clicks waiting for the bridge: each one wants a connection until it settles. */
+  #pendingConnects = 0;
 
   constructor(private readonly deps: ControllerDeps) {}
+
+  /**
+   * Run once when the service worker starts: loads the setting, adopts tabs that survived a
+   * restart, then connects only if that leaves a reason to (spec section 10).
+   */
+  async start(): Promise<void> {
+    try {
+      this.#alwaysConnected = (await this.deps.preferences?.getAlwaysConnected()) ?? false;
+    } catch {
+      this.#alwaysConnected = false;
+    }
+    await this.restore();
+    this.#reconcile();
+  }
+
+  /**
+   * Explicit connection model: hold a daemon connection only while a tab is connected, a Connect
+   * is in progress, or "Let the agent open tabs" is on. Otherwise close it (and its timers) so
+   * the service worker can idle and another browser can use the daemon.
+   */
+  #wantsConnection(): boolean {
+    return this.#connected.size > 0 || this.#pendingConnects > 0 || this.#alwaysConnected;
+  }
+
+  #reconcile(): void {
+    const bridge = this.deps.bridge;
+    const wanted = this.#wantsConnection();
+    if (wanted && !bridge.running) void bridge.start().catch(() => undefined);
+    else if (!wanted && bridge.running) bridge.stop();
+  }
+
+  /** chrome.storage.onChanged: the setting was changed outside this worker (or by the popup). */
+  onAlwaysConnectedChanged(value: boolean): void {
+    if (this.#alwaysConnected === value) return;
+    this.#alwaysConnected = value;
+    this.#reconcile();
+  }
 
   /**
    * Run once when the service worker starts, before the bridge connects. MV3 can stop and
@@ -160,9 +214,28 @@ export class Controller {
   async #activateForInput(tabId: number): Promise<void> {
     try {
       const tab = await this.deps.tabs.get(tabId);
-      if (!tab.active) await this.deps.tabs.update(tabId, { active: true });
+      if (!tab.active) {
+        await this.deps.tabs.update(tabId, { active: true });
+        await this.#waitUntilVisible(tabId);
+      }
     } catch {
       // the command itself will report a missing tab
+    }
+  }
+
+  /**
+   * Activation is asynchronous in the renderer: input sent before document.visibilityState flips
+   * is silently dropped (seen as the first click after activation doing nothing). Polls for up to
+   * ~1 s and gives up quietly; only an explicit "hidden" keeps it waiting.
+   */
+  async #waitUntilVisible(tabId: number): Promise<void> {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const reply = await this.deps.adapter.sendCommand(tabId, "Runtime.evaluate", {
+        expression: "document.visibilityState",
+        returnByValue: true,
+      });
+      if (!isHiddenReply(reply)) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
     }
   }
 
@@ -276,7 +349,15 @@ export class Controller {
           );
           break;
         case "pair":
+          // Pairing uses its own short-lived socket and closes it; reconnecting afterwards
+          // happens only if a connection is wanted.
           await this.deps.bridge.pair(message.code);
+          this.#reconcile();
+          break;
+        case "set-always-connected":
+          this.#alwaysConnected = message.value;
+          this.#reconcile();
+          await this.deps.preferences?.setAlwaysConnected(message.value);
           break;
       }
     } catch (caught) {
@@ -295,7 +376,30 @@ export class Controller {
       state,
       ...(message === undefined ? {} : { error: message }),
       connectedCount: this.#connected.size,
+      alwaysConnected: this.#alwaysConnected,
     };
+  }
+
+  /** Brings the bridge up for a Connect click; throws a popup-readable error if it cannot. */
+  async #ensureBridge(): Promise<void> {
+    const bridge = this.deps.bridge;
+    if (bridge.state === "ready") return;
+    await bridge.start();
+    const state = await bridge.waitForReady(CONNECT_WAIT_MS);
+    if (state === "ready") return;
+    if (state === "unpaired") {
+      throw new BrowserUseError("NOT_PAIRED", "Enter the pairing code first");
+    }
+    if (state === "inUse") {
+      throw new BrowserUseError(
+        "BRIDGE_IN_USE",
+        "Another browser is connected to Browser Use. Disconnect its tabs or close it first.",
+      );
+    }
+    throw new BrowserUseError(
+      "BRIDGE_DISCONNECTED",
+      "Local server not reachable. Start an MCP client or run `browseruse-mcp status`",
+    );
   }
 
   async #connectActive(): Promise<number | undefined> {
@@ -303,12 +407,17 @@ export class Controller {
     if (bridgeState === "unpaired") {
       throw new BrowserUseError("NOT_PAIRED", "Enter the pairing code first");
     }
-    if (bridgeState !== "ready") {
-      throw new BrowserUseError(
-        "BRIDGE_DISCONNECTED",
-        "Start an MCP client or run `browseruse-mcp status`",
-      );
+    this.#pendingConnects += 1;
+    try {
+      await this.#ensureBridge();
+      return await this.#connectActiveTab();
+    } finally {
+      this.#pendingConnects -= 1;
+      this.#reconcile();
     }
+  }
+
+  async #connectActiveTab(): Promise<number> {
     const [active] = await this.deps.tabs.query({ active: true, lastFocusedWindow: true });
     if (!active) throw new BrowserUseError("TAB_NOT_CONNECTED", "No active tab");
     const tabId = await targetTabIdForConnect(active, (properties) =>
@@ -447,6 +556,7 @@ export class Controller {
     } catch {
       /* bridge unavailable */
     }
+    this.#reconcile();
     await this.#safeDetach(tabId);
   }
 
@@ -521,4 +631,11 @@ export class Controller {
       /* bridge went away before we could answer */
     }
   }
+}
+
+function isHiddenReply(reply: unknown): boolean {
+  if (typeof reply !== "object" || reply === null) return false;
+  const result = (reply as { result?: unknown }).result;
+  if (typeof result !== "object" || result === null) return false;
+  return (result as { value?: unknown }).value === "hidden";
 }

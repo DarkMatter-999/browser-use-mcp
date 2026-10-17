@@ -19,7 +19,22 @@ export interface SocketLike {
   close(code?: number, reason?: string): void;
 }
 
-export type BridgeState = "idle" | "unpaired" | "connecting" | "ready" | "backoff" | "error";
+/**
+ * `off`: paired, but no connection is wanted (no connected tab, "Let the agent open tabs" off).
+ * `inUse`: the daemon refused this browser because another one holds its single peer slot.
+ */
+export type BridgeState =
+  "idle" | "off" | "unpaired" | "connecting" | "ready" | "backoff" | "inUse" | "error";
+
+/** States after which `waitForReady` stops waiting: the outcome of a connection attempt. */
+const SETTLED: ReadonlySet<BridgeState> = new Set<BridgeState>([
+  "off",
+  "unpaired",
+  "ready",
+  "backoff",
+  "inUse",
+  "error",
+]);
 
 export interface BridgeHandlers {
   onMessage(message: WireMessage): void;
@@ -38,6 +53,8 @@ const PONG_TIMEOUT_MS = 10_000;
 const PAIR_TIMEOUT_MS = 10_000;
 const MAX_BACKOFF_MS = 30_000;
 const VERSION_RETRY_MS = 30_000;
+/** Another browser holds the daemon: retry slowly so two browsers never flap. */
+export const IN_USE_RETRY_MS = 30_000;
 const CODE_PATTERN = /^[A-Z2-9]{8}$/;
 
 export class BridgeClient {
@@ -48,7 +65,10 @@ export class BridgeClient {
   #retryTimer: ReturnType<typeof setTimeout> | undefined;
   #pingTimer: ReturnType<typeof setInterval> | undefined;
   #pongTimer: ReturnType<typeof setTimeout> | undefined;
-  #terminal: "unpaired" | "version" | undefined;
+  #terminal: "unpaired" | "version" | "inUse" | undefined;
+  /** True while #connect awaits storage, so concurrent calls cannot open two sockets. */
+  #opening = false;
+  readonly #waiters = new Set<(state: BridgeState) => void>();
   /** Why the daemon refused the last handshake without revoking the pairing (throttle, timeout). */
   #retryDetail: string | undefined;
 
@@ -61,26 +81,78 @@ export class BridgeClient {
     return this.#state;
   }
 
+  /** Whether a connection is wanted (between start and stop), whatever its current state. */
+  get running(): boolean {
+    return this.#running;
+  }
+
+  /** Reports `unpaired` or `off` from storage while no connection is wanted. */
+  async init(): Promise<void> {
+    if (this.#running) return;
+    const token = await this.deps.settings.getToken();
+    if (this.#startedMeanwhile()) return;
+    if (token) {
+      this.#terminal = undefined;
+      this.#setState("off");
+    } else {
+      this.#terminal = "unpaired";
+      this.#setState("unpaired", "Not paired");
+    }
+  }
+
+  /**
+   * Wants a connection. Idempotent while connected or connecting; from backoff or inUse it
+   * retries now instead of waiting for the timer (an explicit Connect click).
+   */
   async start(): Promise<void> {
     this.#running = true;
     this.#terminal = undefined;
+    if (this.#retryTimer !== undefined) {
+      clearTimeout(this.#retryTimer);
+      this.#retryTimer = undefined;
+    }
     await this.#connect();
   }
 
+  /** No connection wanted: closes the socket and cancels heartbeat and reconnect timers. */
   stop(): void {
     this.#running = false;
     this.#clearTimers();
     const socket = this.#socket;
     this.#socket = undefined;
     socket?.close(1000, "stopped");
-    this.#setState("idle");
+    if (this.#terminal === "unpaired") {
+      if (this.#state !== "unpaired") this.#setState("unpaired", "Not paired");
+      return;
+    }
+    this.#terminal = undefined;
+    this.#setState("off");
+  }
+
+  /**
+   * Resolves with the outcome of the current connection attempt (`ready`, `backoff`, `inUse`,
+   * ...), or with the state at `timeoutMs` if nothing settles by then.
+   */
+  waitForReady(timeoutMs: number): Promise<BridgeState> {
+    if (SETTLED.has(this.#state)) return Promise.resolve(this.#state);
+    return new Promise((resolve) => {
+      const done = (state: BridgeState): void => {
+        clearTimeout(timer);
+        this.#waiters.delete(done);
+        resolve(state);
+      };
+      const timer = setTimeout(() => {
+        done(this.#state);
+      }, timeoutMs);
+      this.#waiters.add(done);
+    });
   }
 
   send(message: WireMessage): void {
     const socket = this.#socket;
     if (this.#state !== "ready" || socket?.readyState !== OPEN) {
       throw new BrowserUseError("BRIDGE_DISCONNECTED", "Bridge unavailable", {
-        hint: "Make sure an MCP client is running (it starts the local daemon) and the popup shows Connected.",
+        hint: 'Connect a tab from the Browser Use popup (or turn on "Let the agent open tabs") and make sure an MCP client is running.',
       });
     }
     const text = serializeWireMessage(message);
@@ -159,27 +231,41 @@ export class BridgeClient {
       };
     });
     await this.deps.settings.setToken(token);
+    // The pairing socket is already closed. Reconnect with the new token only if a connection
+    // is wanted; otherwise stay off (the controller decides, spec section 10).
     this.#terminal = undefined;
     this.#attempt = 0;
     this.#clearTimers();
     const previous = this.#socket;
     this.#socket = undefined;
     previous?.close(1000, "re-pairing");
-    this.#running = true;
-    await this.#connect();
+    if (this.#running) await this.#connect();
+    else this.#setState("off");
   }
 
   async #connect(): Promise<void> {
-    if (!this.#running || this.#socket) return;
-    const token = await this.deps.settings.getToken();
+    if (!this.#running || this.#socket || this.#opening) return;
+    this.#opening = true;
+    let token: string | undefined;
+    let port: number;
+    let peerId: string;
+    try {
+      token = await this.deps.settings.getToken();
+      port = await this.deps.settings.getPort();
+      peerId = await this.deps.settings.getPeerId();
+    } finally {
+      this.#opening = false;
+    }
+    // start/stop may have run while storage was read.
+    if (!this.#stillWantsSocket()) return;
     if (!token) {
       this.#terminal = "unpaired";
       this.#setState("unpaired", "Not paired");
       return;
     }
-    const port = await this.deps.settings.getPort();
-    const peerId = await this.deps.settings.getPeerId();
-    this.#setState("connecting");
+    // Retrying after BRIDGE_IN_USE keeps showing inUse until it either gets in or is refused
+    // again, so the popup does not flicker every 30 s.
+    if (this.#state !== "inUse") this.#setState("connecting");
     const socket = this.deps.createSocket(`ws://127.0.0.1:${port}`);
     this.#socket = socket;
     socket.onopen = () => {
@@ -233,6 +319,13 @@ export class BridgeClient {
           this.#retryDetail = message.error.message;
           return;
         }
+        // Another browser holds the daemon. The token is fine: keep it, report inUse and retry
+        // slowly when the daemon closes the socket.
+        if (this.#state !== "ready" && message.error.code === "BRIDGE_IN_USE") {
+          this.#terminal = "inUse";
+          this.#setState("inUse", message.error.message);
+          return;
+        }
         if (message.error.code === "VERSION_MISMATCH") {
           this.#terminal = "version";
           this.#setState("error", message.error.hint ?? message.error.message);
@@ -254,11 +347,13 @@ export class BridgeClient {
     const delay =
       this.#terminal === "version"
         ? VERSION_RETRY_MS
-        : Math.min(1_000 * 2 ** this.#attempt, MAX_BACKOFF_MS);
-    this.#attempt += 1;
+        : this.#terminal === "inUse"
+          ? IN_USE_RETRY_MS
+          : Math.min(1_000 * 2 ** this.#attempt, MAX_BACKOFF_MS);
+    if (this.#terminal !== "inUse") this.#attempt += 1;
     const detail = this.#retryDetail;
     this.#retryDetail = undefined;
-    if (this.#terminal !== "version") this.#setState("backoff", detail);
+    if (this.#terminal === undefined) this.#setState("backoff", detail);
     this.#retryTimer = setTimeout(() => {
       this.#terminal = undefined;
       void this.#connect();
@@ -280,6 +375,15 @@ export class BridgeClient {
     }, PING_INTERVAL_MS);
   }
 
+  /** Re-reads mutable state after an await (a method call keeps TypeScript from narrowing). */
+  #startedMeanwhile(): boolean {
+    return this.#running;
+  }
+
+  #stillWantsSocket(): boolean {
+    return this.#running && this.#socket === undefined;
+  }
+
   #clearHeartbeat(): void {
     clearInterval(this.#pingTimer);
     clearTimeout(this.#pongTimer);
@@ -296,5 +400,6 @@ export class BridgeClient {
   #setState(state: BridgeState, detail?: string): void {
     this.#state = state;
     this.handlers.onState(state, detail);
+    if (SETTLED.has(state)) for (const waiter of [...this.#waiters]) waiter(state);
   }
 }

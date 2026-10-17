@@ -39,6 +39,12 @@ type DownloadMessage = Extract<WireMessage, { type: "download" }>;
 type RegisterTabMessage = Extract<WireMessage, { type: "registerTab" }>;
 
 export interface PeerEvents {
+  /**
+   * Asked after the token checks out, before the peer becomes ready. Returning false refuses the
+   * hello with BRIDGE_IN_USE (another browser holds the single peer slot). Not a pairing failure:
+   * the token is valid and the limiter is untouched. Omitted means always admit.
+   */
+  admit?(peer: ExtensionPeer): boolean;
   onReady(peer: ExtensionPeer): void;
   onClose(peer: ExtensionPeer): void;
   onTabsChanged(): void;
@@ -56,6 +62,13 @@ const HANDSHAKE_TIMEOUT_MS = 10_000;
 const IDLE_TIMEOUT_MS = 90_000;
 const TAB_ACTION_TIMEOUT_MS = 30_000;
 
+/** Shown wherever a daemon call needs the extension and no ready peer is connected. */
+export const BRIDGE_DISCONNECTED_HINT =
+  'Connect a tab from the Browser Use extension popup, or turn on "Let the agent open tabs" in the popup\'s Settings so the extension stays connected. If the popup says Not paired, run `browseruse-mcp pair`; `browseruse-mcp doctor` checks the rest.';
+
+export const BRIDGE_IN_USE_MESSAGE =
+  "Another browser is already connected to Browser Use. Close its connection or disconnect its tabs first.";
+
 export class ExtensionPeer {
   readonly #socket: PeerSocket;
   readonly #pending = new PendingRequests();
@@ -63,6 +76,7 @@ export class ExtensionPeer {
   #ready = false;
   #closed = false;
   #peerId: string | undefined;
+  #lastSeen = Date.now();
   #handshakeTimer: ReturnType<typeof setTimeout>;
   #idleTimer: ReturnType<typeof setTimeout> | undefined;
   readonly #log: Logger;
@@ -102,6 +116,11 @@ export class ExtensionPeer {
 
   get peerId(): string | undefined {
     return this.#peerId;
+  }
+
+  /** Milliseconds since the extension last sent anything (it pings every 20 s while ready). */
+  get silentForMs(): number {
+    return Date.now() - this.#lastSeen;
   }
 
   get pendingRequestCount(): number {
@@ -198,9 +217,7 @@ export class ExtensionPeer {
       throw new BrowserUseError(
         "BRIDGE_DISCONNECTED",
         "The Browser Use extension is not connected",
-        {
-          hint: "Run `browseruse-mcp doctor`, then open the extension popup and make sure it is paired.",
-        },
+        { hint: BRIDGE_DISCONNECTED_HINT },
       );
     }
   }
@@ -247,6 +264,7 @@ export class ExtensionPeer {
       this.#protocolError(`Invalid bridge message (${code})`);
       return;
     }
+    this.#lastSeen = Date.now();
     if (this.#idleTimer) this.#armIdle();
     if (!this.#ready) {
       this.#onHandshakeMessage(message);
@@ -291,6 +309,12 @@ export class ExtensionPeer {
         "NOT_PAIRED",
         "Not paired. Run `browseruse-mcp pair` and enter the code in the extension popup.",
       );
+      return;
+    }
+    // A second browser with a valid token is refused rather than evicting the first (which made
+    // two browsers flap). BRIDGE_IN_USE never touches the limiter or the stored token.
+    if (this.events.admit?.(this) === false) {
+      this.#deny("BRIDGE_IN_USE", BRIDGE_IN_USE_MESSAGE, "in use");
       return;
     }
     clearTimeout(this.#handshakeTimer);
@@ -394,7 +418,7 @@ export class ExtensionPeer {
     }
   }
 
-  #deny(code: ErrorCode, reason: string): void {
+  #deny(code: ErrorCode, reason: string, closeReason = "unauthorized"): void {
     void this.#log.error(`${this.#label}: handshake denied (${code}): ${reason}`);
     this.#trySend({
       type: "error",
@@ -402,7 +426,7 @@ export class ExtensionPeer {
       error: { code, message: reason },
     });
     this.#teardown(reason);
-    this.#socket.close(1008, "unauthorized");
+    this.#socket.close(1008, closeReason);
   }
 
   #protocolError(reason: string): void {

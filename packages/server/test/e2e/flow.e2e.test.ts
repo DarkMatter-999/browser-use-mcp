@@ -94,6 +94,15 @@ interface OverlayGlobal {
   __browserUseOverlay: { hide(): void; show(): void };
 }
 
+interface PopupStatus {
+  bridge: string;
+  bridgeDetail?: string;
+  state: string;
+  error?: string;
+  connectedCount: number;
+  alwaysConnected: boolean;
+}
+
 interface TabJson {
   tabId: number;
   url: string;
@@ -111,6 +120,7 @@ describe.skipIf(!chromeAvailable)(suiteName, () => {
   let browser: LaunchedBrowser;
   let client: Client;
   let popup: Page;
+  let port: number;
   let fixturePage: Page;
   let env: NodeJS.ProcessEnv;
   let fixtureUrl: string;
@@ -160,7 +170,7 @@ describe.skipIf(!chromeAvailable)(suiteName, () => {
     fixture = await startFixtureServer();
     fixtureUrl = `${fixture.origin}/index.html`;
     home = await tempDir("bu-e2e-home-");
-    const port = await freePort();
+    port = await freePort();
     env = { ...process.env, BROWSER_USE_HOME: home, BROWSER_USE_PORT: String(port) };
     browser = await launchBrowser({ extensionDir, chromeBin });
 
@@ -183,15 +193,6 @@ describe.skipIf(!chromeAvailable)(suiteName, () => {
 
     fixturePage = await browser.context.newPage();
     await fixturePage.goto(fixtureUrl);
-    await fixturePage.bringToFront();
-    const connected = (await popupSend(popup, { type: "connect-active-tab" })) as {
-      error?: string;
-    };
-    expect(connected.error).toBeUndefined();
-    const listed = await poll(async () => (await tabs()).find((tab) => tab.url === fixtureUrl), {
-      what: "the fixture tab in browser_tabs",
-    });
-    tabId = listed.tabId;
   });
 
   afterAll(async () => {
@@ -211,6 +212,43 @@ describe.skipIf(!chromeAvailable)(suiteName, () => {
         /* best-effort cleanup */
       }
     }
+  });
+
+  async function popupStatus(page = popup): Promise<PopupStatus> {
+    return (await popupSend(page, { type: "get-status" })) as PopupStatus;
+  }
+
+  async function extensionConnected(): Promise<boolean> {
+    return (await ok("browser_status")).json.extensionConnected === true;
+  }
+
+  function waitForExtension(connected: boolean, what: string): Promise<true> {
+    return poll(async () => ((await extensionConnected()) === connected ? true : undefined), {
+      what,
+    });
+  }
+
+  it("explicit connection: no socket until a tab is connected", async () => {
+    // Paired, no tab connected, "Let the agent open tabs" off (the default): nothing is held.
+    expect(await popupStatus()).toMatchObject({ bridge: "off", alwaysConnected: false });
+    expect(await extensionConnected()).toBe(false);
+    const refused = await call("browser_open_tab", { url: fixtureUrl });
+    expect(refused.isError).toBe(true);
+    const { error } = refused.json as unknown as ErrorJson;
+    expect(error.code).toBe("BRIDGE_DISCONNECTED");
+    expect(error.hint).toMatch(/Connect a tab from the Browser Use extension popup/);
+    expect(error.hint).toContain('"Let the agent open tabs"');
+
+    // Connecting the first tab brings the connection up.
+    await fixturePage.bringToFront();
+    const connected = (await popupSend(popup, { type: "connect-active-tab" })) as PopupStatus;
+    expect(connected.error).toBeUndefined();
+    expect(connected).toMatchObject({ bridge: "ready", state: "connected", connectedCount: 1 });
+    const listed = await poll(async () => (await tabs()).find((tab) => tab.url === fixtureUrl), {
+      what: "the fixture tab in browser_tabs",
+    });
+    tabId = listed.tabId;
+    expect(await extensionConnected()).toBe(true);
   });
 
   it("identity and tools", async () => {
@@ -390,6 +428,39 @@ describe.skipIf(!chromeAvailable)(suiteName, () => {
     await ok("browser_navigate", { tabId, url: fixtureUrl });
   });
 
+  it("a second browser is refused with BRIDGE_IN_USE while the first keeps working", async () => {
+    const second = await launchBrowser({ extensionDir, chromeBin });
+    try {
+      const code = PAIRING_CODE.exec(await cli(["pair"], env))?.[1];
+      const secondPopup = await extensionPage(second.context, EXTENSION_ID);
+      await setExtensionStorage(secondPopup, { port });
+      const paired = (await popupSend(secondPopup, { type: "pair", code })) as PopupStatus;
+      expect(paired.error).toBeUndefined();
+      expect(paired.bridge).toBe("off");
+      await popupSend(secondPopup, { type: "set-always-connected", value: true });
+      const refused = await poll(
+        async () => {
+          const status = await popupStatus(secondPopup);
+          return status.bridge === "inUse" ? status : undefined;
+        },
+        { what: "the second browser to report inUse" },
+      );
+      expect(refused.bridgeDetail).toMatch(/another browser is already connected/i);
+      // Connect in the second browser fails the same way and attaches nothing.
+      const connect = (await popupSend(secondPopup, {
+        type: "connect-active-tab",
+      })) as PopupStatus;
+      expect(connect.error).toMatch(/another browser is connected/i);
+      expect(connect.connectedCount).toBe(0);
+      // The first browser was never displaced.
+      expect(await evaluate("1 + 1")).toBe(2);
+      expect((await tabs()).some((tab) => tab.tabId === tabId)).toBe(true);
+      expect(await popupStatus()).toMatchObject({ bridge: "ready", connectedCount: 1 });
+    } finally {
+      await second.close();
+    }
+  });
+
   it("daemon restart and reconnect", async () => {
     await cli(["stop"], env);
     await poll(
@@ -440,5 +511,29 @@ describe.skipIf(!chromeAvailable)(suiteName, () => {
     const gone = await call("browser_evaluate", { tabId, expression: "1" });
     expect(gone.isError).toBe(true);
     expect((gone.json as unknown as ErrorJson).error.code).toBe("TAB_NOT_CONNECTED");
+    // The last tab is gone, so the extension lets the connection go.
+    await waitForExtension(false, "the extension to disconnect after its last tab");
+    expect(await popupStatus()).toMatchObject({ bridge: "off", connectedCount: 0 });
+  });
+
+  it("alwaysConnected lets the agent open tabs without a connected tab", async () => {
+    const on = (await popupSend(popup, {
+      type: "set-always-connected",
+      value: true,
+    })) as PopupStatus;
+    expect(on.alwaysConnected).toBe(true);
+    await waitForExtension(true, "the extension to connect with alwaysConnected on");
+    const opened = await ok("browser_open_tab", { url: fixtureUrl });
+    const newTab = opened.json.tabId as number;
+    expect(await evaluate("document.title", newTab)).toBe("E2E fixture");
+    await ok("browser_close_tab", { tabId: newTab });
+    await poll(async () => ((await tabs()).length === 0 ? true : undefined), {
+      what: "the agent tab to close",
+    });
+    // Still connected with no tabs while the setting is on; off drops it again.
+    expect(await extensionConnected()).toBe(true);
+    await popupSend(popup, { type: "set-always-connected", value: false });
+    await waitForExtension(false, "the extension to disconnect with alwaysConnected off");
+    expect(await popupStatus()).toMatchObject({ bridge: "off", alwaysConnected: false });
   });
 });

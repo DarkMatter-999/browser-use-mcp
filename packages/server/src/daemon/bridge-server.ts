@@ -2,16 +2,28 @@ import { EventEmitter } from "node:events";
 import type { IncomingMessage } from "node:http";
 import { BrowserUseError, MAX_WIRE_MESSAGE_BYTES } from "@browser-use/protocol";
 import { type WebSocket, WebSocketServer } from "ws";
-import { ExtensionPeer, type PeerAuth, type PeerEvents } from "./extension-peer";
+import {
+  BRIDGE_DISCONNECTED_HINT,
+  ExtensionPeer,
+  type PeerAuth,
+  type PeerEvents,
+} from "./extension-peer";
 import type { Logger } from "./log";
 
 const LOOPBACK_HOST = "127.0.0.1";
+/**
+ * The extension pings every 20 s and waits 10 s for the pong. A ready peer silent for longer has
+ * missed its heartbeat window (half-open socket, frozen browser) and no longer holds the slot.
+ */
+const PEER_STALE_MS = 30_000;
 
 export interface BridgeServerOptions {
   port: number;
   extensionId: string;
   auth: PeerAuth;
   daemonVersion: string;
+  /** Override of the heartbeat window after which a silent ready peer may be replaced (tests). */
+  peerStaleMs?: number;
   /** Records rejected upgrades, handshake denials and protocol errors (never tokens or codes). */
   log?: Logger;
 }
@@ -46,9 +58,7 @@ export class BridgeServer extends EventEmitter {
       throw new BrowserUseError(
         "BRIDGE_DISCONNECTED",
         "The Browser Use extension is not connected",
-        {
-          hint: "Run `browseruse-mcp doctor`. Make sure the extension is installed, paired, and its popup shows Connected.",
-        },
+        { hint: BRIDGE_DISCONNECTED_HINT },
       );
     }
     return peer;
@@ -117,8 +127,25 @@ export class BridgeServer extends EventEmitter {
     });
   }
 
+  /**
+   * Single peer slot, first come first served: a later hello is refused while a live peer holds
+   * it. A peer that missed its heartbeat window is dropped so a dead browser cannot lock others
+   * out until the 90 s idle timeout.
+   */
+  #admit(candidate: ExtensionPeer): boolean {
+    const current = this.#peer;
+    if (!current || current === candidate || !current.isReady) return true;
+    if (current.silentForMs <= (this.#options.peerStaleMs ?? PEER_STALE_MS)) return false;
+    void this.#options.log?.info(
+      `bridge: dropping the previous peer (silent for ${String(current.silentForMs)} ms)`,
+    );
+    current.close();
+    return true;
+  }
+
   #onConnection(socket: WebSocket, remotePort?: number): void {
     const events: PeerEvents = {
+      admit: (peer) => this.#admit(peer),
       onReady: (peer) => {
         const previous = this.#peer;
         this.#peer = peer;

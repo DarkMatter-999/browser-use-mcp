@@ -93,10 +93,12 @@ export async function runDoctor(ctx: CommandContext): Promise<number> {
       status.extensionConnected
         ? { level: "ok", name: "extension", detail: "connected" }
         : {
+            // Expected, not an error: the extension only connects while a tab is connected or
+            // "Let the agent open tabs" is on (spec section 10).
             level: "warn",
             name: "extension",
-            detail: "not connected",
-            fix: "Open the Browser Use extension popup and enter the code from `browseruse-mcp pair`.",
+            detail: "not connected (normal while no tabs are connected)",
+            fix: 'Connect a tab from the Browser Use popup, or turn on "Let the agent open tabs" in its Settings. If the popup says Not paired, enter the code from `browseruse-mcp pair`.',
           },
     );
   } else {

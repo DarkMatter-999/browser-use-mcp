@@ -164,8 +164,81 @@ describe("BridgeServer", () => {
     socket.close();
   });
 
-  it("replaces the previous ready peer when a new authenticated one connects", async () => {
-    const { server, port } = await start();
+  it("refuses a second browser with BRIDGE_IN_USE and keeps the first peer working", async () => {
+    const lines: string[] = [];
+    const { server, port } = await start(lines);
+    const first = connect(port);
+    await opened(first);
+    first.send(JSON.stringify(helloMessage()));
+    await nextMessage(first);
+    const firstPeer = server.peer;
+    let firstClosed = false;
+    first.once("close", () => {
+      firstClosed = true;
+    });
+    const second = connect(port);
+    await opened(second);
+    const denial = nextMessage(second);
+    const secondClosed = new Promise<number>((resolve) =>
+      second.once("close", (code) => {
+        resolve(code);
+      }),
+    );
+    second.send(JSON.stringify(helloMessage()));
+    expect(await denial).toMatchObject({
+      type: "error",
+      error: {
+        code: "BRIDGE_IN_USE",
+        message: expect.stringMatching(/another browser/i) as string,
+      },
+    });
+    expect(await secondClosed).toBe(1008);
+    expect(firstClosed).toBe(false);
+    expect(server.peer).toBe(firstPeer);
+    const pong = nextMessage(first);
+    first.send(JSON.stringify({ type: "ping", version: 1 }));
+    expect(await pong).toEqual({ type: "pong", version: 1 });
+    expect(lines.join("\n")).toMatch(/handshake denied \(BRIDGE_IN_USE\)/);
+    first.close();
+  });
+
+  it("a refused second browser does not count as a pairing failure", async () => {
+    const { port, codes } = await start();
+    const first = connect(port);
+    await opened(first);
+    first.send(JSON.stringify(helloMessage()));
+    await nextMessage(first);
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const extra = connect(port);
+      await opened(extra);
+      const denial = nextMessage(extra);
+      extra.send(JSON.stringify(helloMessage()));
+      expect(await denial).toMatchObject({ error: { code: "BRIDGE_IN_USE" } });
+    }
+    const pairing = connect(port);
+    await opened(pairing);
+    const paired = nextMessage(pairing);
+    pairing.send(JSON.stringify({ type: "pair", version: 1, code: codes.create() }));
+    expect(await paired).toMatchObject({ type: "paired" });
+    pairing.close();
+    first.close();
+  });
+
+  it("replaces a ready peer that missed its heartbeat window", async () => {
+    const port = await freePort();
+    const server = new BridgeServer({
+      port,
+      extensionId: EXT,
+      daemonVersion: "1",
+      peerStaleMs: 50,
+      auth: {
+        verifyToken: (token) => token === TOKEN,
+        consumePairingCode: () => undefined,
+        limiter: new FailureLimiter(),
+      },
+    });
+    await server.start();
+    servers.push(server);
     const first = connect(port);
     await opened(first);
     first.send(JSON.stringify(helloMessage()));
@@ -175,10 +248,12 @@ describe("BridgeServer", () => {
         resolve(code);
       }),
     );
+    await new Promise((resolve) => setTimeout(resolve, 100));
     const second = connect(port);
     await opened(second);
+    const ack = nextMessage(second);
     second.send(JSON.stringify(helloMessage()));
-    await nextMessage(second);
+    expect(await ack).toMatchObject({ type: "helloAck" });
     expect(await closed).toBe(1001);
     expect(server.peer?.isReady).toBe(true);
     second.close();
@@ -201,7 +276,10 @@ describe("BridgeServer", () => {
   it("requirePeer throws BRIDGE_DISCONNECTED with a hint when nothing is connected", async () => {
     const { server } = await start();
     expect(() => server.requirePeer()).toThrow(
-      expect.objectContaining({ code: "BRIDGE_DISCONNECTED" }),
+      expect.objectContaining({
+        code: "BRIDGE_DISCONNECTED",
+        hint: expect.stringMatching(/connect a tab.*Let the agent open tabs/is) as string,
+      }),
     );
   });
 

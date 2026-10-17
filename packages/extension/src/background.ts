@@ -1,7 +1,7 @@
 import "./zod-jitless";
 import { resolveTabUrl } from "./shared/tab-url";
 import { BridgeClient, type SocketLike } from "./bridge/client";
-import { Settings } from "./bridge/settings";
+import { ALWAYS_CONNECTED_KEY, Settings } from "./bridge/settings";
 import { DebuggerAdapter } from "./cdp/debugger-adapter";
 import { Controller, type PopupMessage } from "./controller";
 import { trackDownloads } from "./downloads";
@@ -52,10 +52,12 @@ const groupApi: GroupApi = {
   },
 };
 
+const settings = new Settings(chrome.storage.local);
+
 // `controller` is assigned below; the callbacks only run after start(), when it exists.
 const bridge = new BridgeClient(
   {
-    settings: new Settings(chrome.storage.local),
+    settings,
     createSocket,
     extensionVersion: chrome.runtime.getManifest().version,
   },
@@ -101,6 +103,10 @@ const controller = new Controller({
   isAllowedFileSchemeAccess: () => chrome.extension.isAllowedFileSchemeAccess(),
   addToGroup: (tabId) => addToBrowserUseGroup(groupApi, tabId),
   downloads,
+  preferences: {
+    getAlwaysConnected: () => settings.getAlwaysConnected(),
+    setAlwaysConnected: (value) => settings.setAlwaysConnected(value),
+  },
   session: {
     load: async () => (await chrome.storage.session.get(SESSION_KEY))[SESSION_KEY],
     save: (tabs) => chrome.storage.session.set({ [SESSION_KEY]: tabs }),
@@ -118,16 +124,25 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (change.title !== undefined || change.url !== undefined) void controller.onTabUpdated(tabId);
 });
-chrome.runtime.onMessage.addListener((message: PopupMessage, _sender, reply) => {
-  void controller.onPopupMessage(message).then(reply);
-  return true;
+chrome.storage.onChanged.addListener((changes, area) => {
+  const change = changes[ALWAYS_CONNECTED_KEY];
+  if (area === "local" && change) controller.onAlwaysConnectedChanged(change.newValue === true);
 });
 
-// Adopt tabs that survived a service-worker restart before the bridge re-registers tabs.
-const restored = controller.restore().catch(() => undefined);
-const start = (): void => {
-  void restored.then(() => bridge.start());
+// Explicit connection model (spec section 10): no socket unless a tab is connected (including
+// tabs adopted after a service-worker restart) or "Let the agent open tabs" is on.
+const started = bridge
+  .init()
+  .then(() => controller.start())
+  .catch(() => undefined);
+
+chrome.runtime.onMessage.addListener((message: PopupMessage, _sender, reply) => {
+  void started.then(() => controller.onPopupMessage(message)).then(reply);
+  return true;
+});
+// Listening wakes the worker on browser start so the setting can bring the connection up.
+const wake = (): void => {
+  void started;
 };
-chrome.runtime.onStartup.addListener(start);
-chrome.runtime.onInstalled.addListener(start);
-start();
+chrome.runtime.onStartup.addListener(wake);
+chrome.runtime.onInstalled.addListener(wake);

@@ -20,6 +20,7 @@ describe("ERROR_CODES", () => {
       "ELEMENT_NOT_INTERACTABLE",
       "NAVIGATION_FAILED",
       "LIMIT_EXCEEDED",
+      "BRIDGE_IN_USE",
     ]);
   });
 });

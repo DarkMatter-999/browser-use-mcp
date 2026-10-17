@@ -56,6 +56,14 @@ describe("status", () => {
     expect(c.text()).toContain("5");
   });
 
+  it("explains that a disconnected extension is expected while no tabs are connected", async () => {
+    daemon = await startInProcessDaemon();
+    daemon.backend.connected = false;
+    const c = capture();
+    expect(await run(["status"], c.io, deps(daemon))).toBe(0);
+    expect(c.text()).toMatch(/Extension: not connected \(it connects while a tab is connected/);
+  });
+
   it("--json prints the status object", async () => {
     daemon = await startInProcessDaemon();
     const c = capture();
@@ -100,7 +108,13 @@ describe("doctor", () => {
     const code = await run(["doctor"], c.io, deps(daemon));
     expect(c.text()).toMatch(/ok\s+node/);
     expect(c.text()).toMatch(/ok\s+daemon/);
-    expect(c.text()).toMatch(/warn\s+extension/);
+    expect(c.text()).toMatch(
+      /warn\s+extension\s+not connected \(normal while no tabs are connected\)/,
+    );
+    expect(c.text()).toMatch(
+      /fix: Connect a tab from the Browser Use popup.*Let the agent open tabs/,
+    );
+    expect(c.text()).not.toMatch(/fail\s+extension/);
     expect(code).toBe(0);
   });
 

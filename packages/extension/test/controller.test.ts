@@ -15,12 +15,27 @@ import {
 
 const rid = "11111111-1111-4111-8111-111111111111";
 
+const RESTING: BridgeState[] = ["off", "unpaired", "idle"];
+
 function setup(state: BridgeState = "ready", overrides: Partial<ControllerDeps> = {}) {
   const sent: WireMessage[] = [];
   const bridge = {
     state,
+    running: !RESTING.includes(state),
+    /** What a connection attempt ends in; undefined leaves the state unchanged. */
+    startsAs: undefined as BridgeState | undefined,
     send: vi.fn((m: WireMessage) => sent.push(m)),
     pair: vi.fn(() => Promise.resolve()),
+    start: vi.fn(() => {
+      bridge.running = true;
+      if (bridge.startsAs !== undefined) bridge.state = bridge.startsAs;
+      return Promise.resolve();
+    }),
+    stop: vi.fn(() => {
+      bridge.running = false;
+      bridge.state = "off";
+    }),
+    waitForReady: vi.fn(() => Promise.resolve(bridge.state)),
   };
   const adapter = {
     attach: vi.fn(() => Promise.resolve()),
@@ -84,7 +99,7 @@ describe("connect from the popup", () => {
   it("refuses when the daemon is unreachable", async () => {
     const { controller, adapter } = setup("backoff");
     const reply = await controller.onPopupMessage({ type: "connect-active-tab" });
-    expect(reply.error).toMatch(/MCP client|daemon/i);
+    expect(reply.error).toMatch(/not reachable.*MCP client/i);
     expect(adapter.attach).not.toHaveBeenCalled();
   });
 
@@ -130,6 +145,19 @@ describe("bridge commands", () => {
       expect(tabs.update.mock.invocationCallOrder[0]).toBeLessThan(
         adapter.sendCommand.mock.invocationCallOrder[0] ?? 0,
       );
+    });
+
+    it("waits for the activated tab to become visible before sending the input", async () => {
+      const { controller, adapter, tabs } = await connected();
+      tabs.get.mockResolvedValueOnce({ ...(await tabs.get(7)), active: false });
+      adapter.sendCommand
+        .mockResolvedValueOnce({ result: { value: "hidden" } })
+        .mockResolvedValueOnce({ result: { value: "visible" } });
+      const done = controller.onBridgeMessage(cmd("Input.dispatchMouseEvent"));
+      await vi.advanceTimersByTimeAsync(100);
+      await done;
+      const methods = adapter.sendCommand.mock.calls.map((call: unknown[]) => call[1]);
+      expect(methods).toEqual(["Runtime.evaluate", "Runtime.evaluate", "Input.dispatchMouseEvent"]);
     });
 
     it("does not update an already active tab", async () => {
@@ -579,5 +607,172 @@ describe("dialogs across a bridge reconnect", () => {
     controller.onBridgeState("ready");
     await vi.advanceTimersByTimeAsync(0);
     expect(sent.find((m) => m.type === "registerTab")).not.toHaveProperty("pendingDialog");
+  });
+});
+
+describe("explicit connection model", () => {
+  function preferences(initial = false) {
+    let value = initial;
+    return {
+      getAlwaysConnected: vi.fn(() => Promise.resolve(value)),
+      setAlwaysConnected: vi.fn((next: boolean) => {
+        value = next;
+        return Promise.resolve();
+      }),
+    };
+  }
+
+  it("holds no connection at start with no tabs and the setting off", async () => {
+    const { controller, bridge } = setup("off", { preferences: preferences(false) });
+    await controller.start();
+    expect(bridge.start).not.toHaveBeenCalled();
+    expect(bridge.running).toBe(false);
+  });
+
+  it("connects when the first tab is connected from the popup", async () => {
+    const { controller, bridge, adapter, sent } = setup("off");
+    bridge.startsAs = "ready";
+    const reply = await controller.onPopupMessage({ type: "connect-active-tab" });
+    expect(bridge.start).toHaveBeenCalledTimes(1);
+    expect(bridge.start.mock.invocationCallOrder[0]).toBeLessThan(
+      adapter.attach.mock.invocationCallOrder[0] ?? 0,
+    );
+    expect(sent[0]).toMatchObject({ type: "registerTab", tabId: 7 });
+    expect(reply).toMatchObject({ bridge: "ready", state: "connected", connectedCount: 1 });
+    expect(bridge.stop).not.toHaveBeenCalled();
+  });
+
+  it("closes the connection again when Connect cannot reach the daemon", async () => {
+    const { controller, bridge, adapter } = setup("off");
+    bridge.startsAs = "backoff";
+    const reply = await controller.onPopupMessage({ type: "connect-active-tab" });
+    expect(reply.error).toMatch(/not reachable/i);
+    expect(adapter.attach).not.toHaveBeenCalled();
+    expect(bridge.stop).toHaveBeenCalled();
+    expect(bridge.running).toBe(false);
+  });
+
+  it("reports another browser on BRIDGE_IN_USE, attaches nothing and lets the socket go", async () => {
+    const { controller, bridge, adapter } = setup("off");
+    bridge.startsAs = "inUse";
+    const reply = await controller.onPopupMessage({ type: "connect-active-tab" });
+    expect(reply.error).toMatch(/another browser is connected/i);
+    expect(adapter.attach).not.toHaveBeenCalled();
+    expect(bridge.running).toBe(false);
+  });
+
+  it("disconnects after the last tab goes away, after unregistering it", async () => {
+    const { controller, bridge } = setup("off");
+    bridge.startsAs = "ready";
+    await controller.onPopupMessage({ type: "connect-active-tab" });
+    await controller.onBridgeMessage({
+      type: "openTab",
+      version: 1,
+      requestId: rid,
+      url: "https://t50/",
+    });
+    await controller.onPopupMessage({ type: "disconnect-tab", tabId: 7 });
+    expect(bridge.stop).not.toHaveBeenCalled();
+    controller.onTabRemoved(50);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(bridge.stop).toHaveBeenCalledTimes(1);
+    const lastSend = bridge.send.mock.invocationCallOrder.at(-1) ?? 0;
+    expect(bridge.send.mock.calls.at(-1)?.[0]).toMatchObject({ type: "unregisterTab", tabId: 50 });
+    expect(lastSend).toBeLessThan(bridge.stop.mock.invocationCallOrder[0] ?? 0);
+  });
+
+  it("disconnects when Chrome detaches the debugger from the last tab", async () => {
+    const { controller, bridge } = setup("off");
+    bridge.startsAs = "ready";
+    await controller.onPopupMessage({ type: "connect-active-tab" });
+    controller.onExternalDetach(7);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(bridge.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("disconnect-all drops the connection when the setting is off", async () => {
+    const { controller, bridge } = setup("off");
+    bridge.startsAs = "ready";
+    await controller.onPopupMessage({ type: "connect-active-tab" });
+    const reply = await controller.onPopupMessage({ type: "disconnect-all" });
+    expect(bridge.stop).toHaveBeenCalled();
+    expect(reply).toMatchObject({ bridge: "off", connectedCount: 0 });
+  });
+
+  it("toggling alwaysConnected on connects and stores it; off disconnects", async () => {
+    const prefs = preferences(false);
+    const { controller, bridge } = setup("off", { preferences: prefs });
+    await controller.start();
+    const on = await controller.onPopupMessage({ type: "set-always-connected", value: true });
+    expect(on.alwaysConnected).toBe(true);
+    expect(prefs.setAlwaysConnected).toHaveBeenCalledWith(true);
+    expect(bridge.start).toHaveBeenCalledTimes(1);
+    const off = await controller.onPopupMessage({ type: "set-always-connected", value: false });
+    expect(off.alwaysConnected).toBe(false);
+    expect(bridge.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the connection when the setting goes off while a tab is connected", async () => {
+    const { controller, bridge } = setup("off", { preferences: preferences(true) });
+    bridge.startsAs = "ready";
+    await controller.start();
+    expect(bridge.start).toHaveBeenCalledTimes(1);
+    await controller.onPopupMessage({ type: "connect-active-tab" });
+    controller.onAlwaysConnectedChanged(false);
+    expect(bridge.stop).not.toHaveBeenCalled();
+    await controller.onPopupMessage({ type: "disconnect-all" });
+    expect(bridge.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("follows setting changes made outside the popup (storage.onChanged)", () => {
+    const { controller, bridge } = setup("off");
+    controller.onAlwaysConnectedChanged(true);
+    expect(bridge.start).toHaveBeenCalledTimes(1);
+    controller.onAlwaysConnectedChanged(true);
+    expect(bridge.start).toHaveBeenCalledTimes(1);
+    controller.onAlwaysConnectedChanged(false);
+    expect(bridge.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("connects at start when the stored setting is on", async () => {
+    const { controller, bridge } = setup("off", { preferences: preferences(true) });
+    await controller.start();
+    expect(bridge.start).toHaveBeenCalledTimes(1);
+    const reply = await controller.onPopupMessage({ type: "get-status" });
+    expect(reply.alwaysConnected).toBe(true);
+  });
+
+  it("connects after a service-worker restart that adopted tabs, and not otherwise", async () => {
+    let stored: unknown = [{ tabId: 7, auto: false }];
+    const session = {
+      load: () => Promise.resolve(stored),
+      save: (tabs: PersistedTab[]) => {
+        stored = tabs;
+        return Promise.resolve();
+      },
+    };
+    const restarted = setup("off", { session });
+    await restarted.controller.start();
+    expect(restarted.adapter.reattach).toHaveBeenCalledWith([7]);
+    expect(restarted.bridge.start).toHaveBeenCalledTimes(1);
+
+    stored = [];
+    const empty = setup("off", { session });
+    await empty.controller.start();
+    expect(empty.bridge.start).not.toHaveBeenCalled();
+  });
+
+  it("pairing leaves the connection off unless something wants it", async () => {
+    const plain = setup("unpaired");
+    await plain.controller.onPopupMessage({ type: "pair", code: "ABCD-2345" });
+    expect(plain.bridge.pair).toHaveBeenCalled();
+    expect(plain.bridge.start).not.toHaveBeenCalled();
+
+    const keep = setup("unpaired", { preferences: preferences(true) });
+    await keep.controller.start();
+    keep.bridge.start.mockClear();
+    keep.bridge.running = false;
+    await keep.controller.onPopupMessage({ type: "pair", code: "ABCD-2345" });
+    expect(keep.bridge.start).toHaveBeenCalledTimes(1);
   });
 });

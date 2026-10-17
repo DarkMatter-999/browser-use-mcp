@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { BrowserUseError, ConnectedTab } from "@browser-use/protocol";
 import { describe, expect, it, vi } from "vitest";
-import type { BridgeServer } from "../src/daemon/bridge-server";
+import { BridgeServer } from "../src/daemon/bridge-server";
 import { ExtensionBackend, MAX_TRACKED_DOWNLOADS } from "../src/daemon/extension-backend";
 
 class FakePeer {
@@ -43,6 +43,28 @@ function setup() {
 const opening = { type: "alert", message: "hi", url: "https://a/" };
 
 describe("ExtensionBackend", () => {
+  it("browser_open_tab without an extension connection fails with BRIDGE_DISCONNECTED and a hint", async () => {
+    const bridge = new BridgeServer({
+      port: 1,
+      extensionId: "abcdefghijklmnopabcdefghijklmnop",
+      daemonVersion: "1",
+      auth: {
+        verifyToken: () => false,
+        consumePairingCode: () => undefined,
+        limiter: { blocked: () => false, record: () => undefined },
+      },
+    });
+    const backend = new ExtensionBackend(bridge);
+    await expect(Promise.resolve().then(() => backend.openTab("https://a/"))).rejects.toMatchObject(
+      {
+        code: "BRIDGE_DISCONNECTED",
+        hint: expect.stringMatching(
+          /Connect a tab from the Browser Use extension popup.*"Let the agent open tabs"/s,
+        ) as string,
+      },
+    );
+  });
+
   it("passes commands through when no dialog is pending", async () => {
     const { backend, peer } = setup();
     await expect(backend.sendCommand(1, "Runtime.evaluate", {}, 1000)).resolves.toEqual({

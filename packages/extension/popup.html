@@ -8,7 +8,7 @@
   <body>
     <main class="popup">
       <h1 class="popup-title">Browser Use</h1>
-      <p id="headline" class="popup-status">Loading…</p>
+      <p id="headline" class="popup-status" data-tone="neutral" aria-live="polite">Loading…</p>
       <p id="detail" class="popup-detail" hidden></p>
       <p id="error" class="error" role="alert" hidden></p>
       <form id="pair-form" class="pair-form" hidden>
@@ -29,6 +29,23 @@
         <button id="disconnect" type="button" class="button">Disconnect this tab</button>
         <button id="disconnect-all" type="button" class="button">Disconnect all</button>
       </div>
+      <section class="settings" aria-labelledby="settings-title">
+        <h2 id="settings-title" class="settings-title">Settings</h2>
+        <label class="setting" for="always-connected">
+          <input
+            id="always-connected"
+            class="setting-input"
+            type="checkbox"
+            role="switch"
+            aria-describedby="always-connected-help"
+          />
+          <span class="setting-label">Let the agent open tabs (keep connected)</span>
+        </label>
+        <p id="always-connected-help" class="setting-help">
+          When off, Browser Use only connects while a tab is connected. The agent can't open tabs
+          until you connect one.
+        </p>
+      </section>
     </main>
     <script type="module" src="/src/popup/main.ts"></script>
   </body>
