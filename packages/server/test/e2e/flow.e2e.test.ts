@@ -293,6 +293,47 @@ describe.skipIf(!chromeAvailable)(suiteName, () => {
     expect(await evaluate("document.getElementById('color').value")).toBe("blue");
   });
 
+  it("types keyboard events and edits with a targeted key press", async () => {
+    await evaluate(`(() => {
+      const input = document.getElementById('email');
+      input.value = '';
+      window.__keyEvents = [];
+      input.onkeydown = (event) => window.__keyEvents.push({ key: event.key, code: event.code, trusted: event.isTrusted });
+    })()`);
+    await ok("browser_type", { tabId, selector: "#email", text: "ab" });
+    expect(await evaluate("document.getElementById('email').value")).toBe("ab");
+    expect(await evaluate("window.__keyEvents.map((event) => event.code)")).toEqual([
+      "KeyA",
+      "KeyB",
+    ]);
+    await ok("browser_press_key", { tabId, selector: "#email", key: "Backspace" });
+    expect(await evaluate("document.getElementById('email').value")).toBe("a");
+    await ok("browser_press_key", { tabId, selector: "#email", key: "Control+a" });
+    expect(await evaluate("document.getElementById('email').value")).toBe("a");
+  });
+
+  it("types exact multiline text without moving focus and replaces the current selection", async () => {
+    await evaluate(`(() => {
+      document.body.insertAdjacentHTML('beforeend', '<textarea id="keyboard-target"></textarea><div id="keyboard-next" contenteditable="true"></div>');
+      const target = document.getElementById('keyboard-target');
+      target.value = 'SELECTME';
+      target.focus();
+      target.setSelectionRange(0, 8);
+    })()`);
+    await ok("browser_type", { tabId, selector: "#keyboard-target", text: "NEW" });
+    expect(await evaluate("document.getElementById('keyboard-target').value")).toBe("NEW");
+
+    const exact = "l1\nl2\tl3";
+    await ok("browser_type", { tabId, selector: "#keyboard-target", text: exact });
+    expect(await evaluate("document.getElementById('keyboard-target').value")).toBe(`NEW${exact}`);
+    expect(await evaluate("document.activeElement.id")).toBe("keyboard-target");
+    expect(await evaluate("document.getElementById('keyboard-next').textContent")).toBe("");
+    await ok("browser_press_key", { tabId, selector: "#keyboard-target", key: "Enter" });
+    expect(await evaluate("document.getElementById('keyboard-target').value")).toBe(
+      `NEW${exact}\n`,
+    );
+  });
+
   it("agent-opened tab", async () => {
     const opened = await ok("browser_open_tab", { url: fixtureUrl });
     expect(opened.json.autoConnected).toBe(true);

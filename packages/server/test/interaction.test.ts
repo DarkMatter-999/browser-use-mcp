@@ -192,10 +192,24 @@ describe("interaction with selectors", () => {
   });
 
   it("inserts text as a CDP payload", async () => {
-    const ctx = scriptedContext({ ...selectorBase, "Input.insertText": () => ({}) }, tabs);
+    const ctx = scriptedContext(
+      {
+        ...selectorBase,
+        "Input.dispatchKeyEvent": () => ({}),
+        "Input.insertText": () => ({}),
+        "DOM.focus": () => ({}),
+      },
+      tabs,
+    );
     const text = `quote ' slash \\ newline\n and emoji 😀`;
     await browserType(ctx, { tabId: 1, selector: "input", text });
-    expect(ctx.calls.find((c) => c.method === "Input.insertText")?.params).toEqual({ text });
+    expect(ctx.calls.filter((c) => c.method === "Input.dispatchKeyEvent")).toHaveLength(
+      (Array.from(new Intl.Segmenter().segment(text)).length - 1) * 2,
+    );
+    expect(
+      ctx.calls.filter((c) => c.method === "Input.insertText").map((c) => c.params.text),
+    ).toEqual(["\n"]);
+    expect(ctx.calls.find((c) => c.method === "Input.dispatchMouseEvent")).toBeUndefined();
   });
 
   it("hovers and focuses", async () => {
@@ -206,16 +220,49 @@ describe("interaction with selectors", () => {
   });
 
   it("scrolls with and without a target and presses keys with modifiers", async () => {
-    const ctx = scriptedContext({ ...selectorBase, "Input.dispatchKeyEvent": () => ({}) }, tabs);
+    const ctx = scriptedContext(
+      { ...selectorBase, "Input.dispatchKeyEvent": () => ({}), "DOM.focus": () => ({}) },
+      tabs,
+    );
     await browserScroll(ctx, { tabId: 1, deltaY: 300 });
     await browserScroll(ctx, { tabId: 1, selector: "div", deltaY: 10 });
     const wheels = ctx.calls.filter((c) => c.params.type === "mouseWheel").map((c) => c.params);
     expect(wheels[0]).toMatchObject({ x: 0, y: 0, deltaY: 300, deltaX: 0 });
     expect(wheels[1]).toMatchObject({ x: 50, y: 25 });
     await browserPressKey(ctx, { tabId: 1, key: "A", modifiers: ["Control", "Shift"] });
-    expect(ctx.calls.find((c) => c.method === "Input.dispatchKeyEvent")?.params).toMatchObject({
-      modifiers: 10,
-    });
+    expect(
+      ctx.calls.filter((c) => c.method === "Input.dispatchKeyEvent").map((c) => c.params),
+    ).toEqual([
+      expect.objectContaining({
+        type: "keyDown",
+        key: "A",
+        code: "KeyA",
+        modifiers: 10,
+        windowsVirtualKeyCode: 65,
+      }),
+      expect.objectContaining({
+        type: "keyUp",
+        key: "A",
+        code: "KeyA",
+        modifiers: 10,
+        windowsVirtualKeyCode: 65,
+      }),
+    ]);
+  });
+
+  it("supports space and focuses an optional press-key target", async () => {
+    const ctx = scriptedContext(
+      { ...selectorBase, "Input.dispatchKeyEvent": () => ({}), "DOM.focus": () => ({}) },
+      tabs,
+    );
+    await browserPressKey(ctx, { tabId: 1, key: "Space", selector: "button" });
+    expect(ctx.calls.find((c) => c.method === "DOM.focus")?.params).toEqual({ nodeId: 11 });
+    expect(
+      ctx.calls.filter((c) => c.method === "Input.dispatchKeyEvent").map((c) => c.params),
+    ).toEqual([
+      expect.objectContaining({ type: "keyDown", key: " ", code: "Space" }),
+      expect.objectContaining({ type: "keyUp", key: " ", code: "Space" }),
+    ]);
   });
 
   it("validates modifiers and scroll bounds", async () => {

@@ -11,6 +11,27 @@ import { requireTab, tabIdField, targetFields } from "./schema";
 const MAX_TEXT = 10_000;
 const MAX_DELTA = 1_000_000;
 const MODIFIER_MASK = { Alt: 1, Control: 2, Meta: 4, Shift: 8 } as const;
+const KEY_INFO: Record<string, { key: string; code: string; keyCode: number }> = {
+  Backspace: { key: "Backspace", code: "Backspace", keyCode: 8 },
+  Tab: { key: "Tab", code: "Tab", keyCode: 9 },
+  Enter: { key: "Enter", code: "Enter", keyCode: 13 },
+  Shift: { key: "Shift", code: "ShiftLeft", keyCode: 16 },
+  Control: { key: "Control", code: "ControlLeft", keyCode: 17 },
+  Alt: { key: "Alt", code: "AltLeft", keyCode: 18 },
+  Escape: { key: "Escape", code: "Escape", keyCode: 27 },
+  Space: { key: " ", code: "Space", keyCode: 32 },
+  PageUp: { key: "PageUp", code: "PageUp", keyCode: 33 },
+  PageDown: { key: "PageDown", code: "PageDown", keyCode: 34 },
+  End: { key: "End", code: "End", keyCode: 35 },
+  Home: { key: "Home", code: "Home", keyCode: 36 },
+  ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37 },
+  ArrowUp: { key: "ArrowUp", code: "ArrowUp", keyCode: 38 },
+  ArrowRight: { key: "ArrowRight", code: "ArrowRight", keyCode: 39 },
+  ArrowDown: { key: "ArrowDown", code: "ArrowDown", keyCode: 40 },
+  Insert: { key: "Insert", code: "Insert", keyCode: 45 },
+  Delete: { key: "Delete", code: "Delete", keyCode: 46 },
+  Meta: { key: "Meta", code: "MetaLeft", keyCode: 91 },
+};
 
 const FILL_FN = `function(value) {
   if (this.disabled) return false;
@@ -56,6 +77,8 @@ const keyShape = {
     .max(4)
     .optional()
     .default([]),
+  ref: targetFields.ref.optional(),
+  selector: targetFields.selector.optional(),
 };
 const keySchema = z.object(keyShape);
 const dragShape = {
@@ -137,10 +160,36 @@ export async function browserType(ctx: ToolContext, input: z.input<typeof typeSc
   const args = typeSchema.parse(input);
   return acting(ctx, args.tabId, "type", async () => {
     const target = await resolveTarget(ctx, args.tabId, args);
-    await pointTo(ctx, target, `Type into ${target.description}`);
-    await mouse(ctx, args.tabId, "mousePressed", target.x, target.y);
-    await mouse(ctx, args.tabId, "mouseReleased", target.x, target.y);
-    await ctx.sendCommand(args.tabId, "Input.insertText", { text: args.text });
+    await ctx.sendCommand(
+      args.tabId,
+      "DOM.focus",
+      target.backendNodeId !== undefined
+        ? { backendNodeId: target.backendNodeId }
+        : { nodeId: target.nodeId ?? 0 },
+    );
+    for (const { segment: character } of new Intl.Segmenter().segment(args.text)) {
+      if (character === "\n" || character === "\r" || character === "\t") {
+        await ctx.sendCommand(args.tabId, "Input.insertText", { text: character });
+        continue;
+      }
+      const info = keyInfo(character);
+      await ctx.sendCommand(args.tabId, "Input.dispatchKeyEvent", {
+        type: "keyDown",
+        key: info.key,
+        ...(info.code === "" ? {} : { code: info.code }),
+        text: character,
+        unmodifiedText: character,
+        windowsVirtualKeyCode: info.keyCode,
+        nativeVirtualKeyCode: info.keyCode,
+      });
+      await ctx.sendCommand(args.tabId, "Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: info.key,
+        ...(info.code === "" ? {} : { code: info.code }),
+        windowsVirtualKeyCode: info.keyCode,
+        nativeVirtualKeyCode: info.keyCode,
+      });
+    }
     return { tabId: args.tabId, performed: true, action: "type", textLength: args.text.length };
   });
 }
@@ -236,19 +285,73 @@ export async function browserPressKey(ctx: ToolContext, input: z.input<typeof ke
   const args = keySchema.parse(input);
   return acting(ctx, args.tabId, "press_key", async () => {
     requireTab(ctx, args.tabId);
-    const mask = args.modifiers.reduce((value, name) => value | MODIFIER_MASK[name], 0);
+    if (args.ref !== undefined && args.selector !== undefined) assertOneTarget(args);
+    if (args.ref !== undefined || args.selector !== undefined) {
+      const target = await resolveTarget(ctx, args.tabId, args);
+      await ctx.sendCommand(
+        args.tabId,
+        "DOM.focus",
+        target.backendNodeId !== undefined
+          ? { backendNodeId: target.backendNodeId }
+          : { nodeId: target.nodeId ?? 0 },
+      );
+    }
+    const chordParts = args.key.split("+");
+    const chordModifiers = chordParts.length > 1 ? chordParts.slice(0, -1) : [];
+    const modifierNames = new Set([...args.modifiers, ...chordModifiers]);
+    const modifiers = [...modifierNames] as (keyof typeof MODIFIER_MASK)[];
+    if (modifiers.some((name) => !(name in MODIFIER_MASK))) {
+      throw new BrowserUseError("INVALID_ARGUMENT", `Unsupported key modifier in ${args.key}`);
+    }
+    const keyName = chordParts.at(-1) ?? args.key;
+    const info = keyInfo(keyName);
+    const mask = modifiers.reduce((value, name) => value | MODIFIER_MASK[name], 0);
     await chooserWatch.armFor(ctx, args.tabId).catch(() => undefined);
     await ctx.sendCommand(args.tabId, "Input.dispatchKeyEvent", {
       type: "keyDown",
-      key: args.key,
+      key: info.key,
+      ...(info.code === "" ? {} : { code: info.code }),
       modifiers: mask,
+      windowsVirtualKeyCode: info.keyCode,
+      nativeVirtualKeyCode: info.keyCode,
+      ...(info.key.length === 1
+        ? { text: info.key, unmodifiedText: info.key }
+        : info.key === "Enter"
+          ? { text: "\r", unmodifiedText: "\r" }
+          : {}),
     });
     await ctx.sendCommand(args.tabId, "Input.dispatchKeyEvent", {
       type: "keyUp",
-      key: args.key,
+      key: info.key,
+      ...(info.code === "" ? {} : { code: info.code }),
       modifiers: mask,
+      windowsVirtualKeyCode: info.keyCode,
+      nativeVirtualKeyCode: info.keyCode,
     });
-    return { tabId: args.tabId, performed: true, action: "press_key", key: args.key };
+    return { tabId: args.tabId, performed: true, action: "press_key", key: keyName };
+  });
+}
+
+function keyInfo(key: string): { key: string; code: string; keyCode: number } {
+  const named = KEY_INFO[key];
+  if (named) return named;
+  if (new Intl.Segmenter().segment(key)[Symbol.iterator]().next().value?.segment === key) {
+    const upper = key.toUpperCase();
+    const isLetter = /^[A-Z]$/.test(upper);
+    const isDigit = /^[0-9]$/.test(key);
+    return {
+      key,
+      code: isLetter ? `Key${upper}` : isDigit ? `Digit${key}` : "",
+      keyCode: isLetter ? upper.charCodeAt(0) : isDigit ? key.charCodeAt(0) : 0,
+    };
+  }
+  const functionKey = /^F([1-9]|1[0-2])$/.exec(key);
+  if (functionKey) {
+    const number = Number(functionKey[1]);
+    return { key, code: key, keyCode: 111 + number };
+  }
+  throw new BrowserUseError("INVALID_ARGUMENT", `Unsupported key ${JSON.stringify(key)}`, {
+    hint: "Use a single character or a supported key name such as Enter, Space, Backspace, Delete, or ArrowLeft.",
   });
 }
 
