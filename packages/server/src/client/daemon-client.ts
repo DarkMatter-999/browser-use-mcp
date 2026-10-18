@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import net from "node:net";
 import {
   BrowserUseError,
+  type BrowserConfig,
   type ConnectedTab,
   type DaemonStatus,
   type DownloadInfo,
@@ -16,6 +17,7 @@ import {
 } from "@browser-use/protocol";
 import { z } from "zod";
 import type { Paths } from "../config";
+import { resolveBrowserConfig } from "../config";
 import {
   canConnect,
   type EnsureDaemonDeps,
@@ -25,6 +27,8 @@ import {
 } from "./ensure-daemon";
 
 const pairingCodeSchema = z.object({ code: z.string(), expiresInSeconds: z.number() });
+const EXTENSION_DAEMON_STARTUP_TIMEOUT_MS = 5_000;
+const LAUNCH_DAEMON_STARTUP_TIMEOUT_MS = 30_000;
 
 type Listener = (method: string, params: JsonObject) => void;
 type Distribute<T> = T extends unknown ? Omit<T, "id"> : never;
@@ -36,6 +40,8 @@ export interface ConnectOptions {
   entryScript: string;
   autostart?: boolean;
   spawnDaemon?: SpawnDaemon;
+  browserConfig?: BrowserConfig;
+  env?: NodeJS.ProcessEnv;
 }
 
 export function compareVersions(a: string, b: string): number {
@@ -55,8 +61,14 @@ function notRunning(): BrowserUseError {
 }
 
 function ensureDeps(options: ConnectOptions): EnsureDaemonDeps {
+  const browserConfig = options.browserConfig ?? resolveBrowserConfig(options.env ?? process.env);
   return {
     clientVersion: options.clientVersion,
+    startupTimeoutMs:
+      browserConfig.mode === "extension"
+        ? EXTENSION_DAEMON_STARTUP_TIMEOUT_MS
+        : LAUNCH_DAEMON_STARTUP_TIMEOUT_MS,
+    ...(options.env === undefined ? {} : { env: options.env }),
     ...(options.spawnDaemon ? { spawnDaemon: options.spawnDaemon } : {}),
   };
 }
@@ -127,6 +139,8 @@ export class DaemonClient {
       type: "hello",
       protocolVersion: PROTOCOL_VERSION,
       clientVersion: this.#options.clientVersion,
+      browserConfig:
+        this.#options.browserConfig ?? resolveBrowserConfig(this.#options.env ?? process.env),
     });
     this.#daemonVersion = await ack;
   }
@@ -326,10 +340,35 @@ export class DaemonClient {
         continue;
       }
       switch (message.type) {
-        case "helloAck":
-          this.#helloAck?.resolve(message.daemonVersion);
+        case "helloAck": {
+          const requested =
+            this.#options.browserConfig ?? resolveBrowserConfig(this.#options.env ?? process.env);
+          const configMismatch =
+            message.error ??
+            (requested.profile !== message.effectiveBrowserConfig.profile ||
+            requested.executablePath !== message.effectiveBrowserConfig.executablePath ||
+            (requested.mode !== "auto" && requested.mode !== message.effectiveBrowserConfig.mode)
+              ? {
+                  code: "CONFIG_MISMATCH" as const,
+                  message: "The running Browser Use daemon uses different browser settings",
+                  hint: "Stop the daemon, then restart it with matching MCP config.",
+                }
+              : undefined);
+          if (configMismatch) {
+            const { code, message: text, hint, details } = configMismatch;
+            this.#helloAck?.reject(
+              new BrowserUseError(code, text, {
+                ...(hint === undefined ? {} : { hint }),
+                ...(details === undefined ? {} : { details }),
+              }),
+            );
+            this.#socket.destroy();
+          } else {
+            this.#helloAck?.resolve(message.daemonVersion);
+          }
           this.#helloAck = undefined;
           break;
+        }
         case "tabsChanged":
           this.#tabs = message.tabs;
           for (const listener of this.#tabListeners) listener(message.tabs);

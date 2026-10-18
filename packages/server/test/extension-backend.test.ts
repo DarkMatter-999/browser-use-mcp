@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import type { BrowserUseError, ConnectedTab } from "@browser-use/protocol";
+import { PROTOCOL_VERSION, type BrowserUseError, type ConnectedTab } from "@browser-use/protocol";
 import { describe, expect, it, vi } from "vitest";
 import { BridgeServer } from "../src/daemon/bridge-server";
 import { ExtensionBackend, MAX_TRACKED_DOWNLOADS } from "../src/daemon/extension-backend";
@@ -43,6 +43,14 @@ function setup() {
 const opening = { type: "alert", message: "hi", url: "https://a/" };
 
 describe("ExtensionBackend", () => {
+  it("does not close the daemon-owned bridge when its backend is closed", async () => {
+    const { backend } = setup();
+
+    await expect(backend.close()).resolves.toBeUndefined();
+
+    expect(backend.isConnected()).toBe(true);
+  });
+
   it("browser_open_tab without an extension connection fails with BRIDGE_DISCONNECTED and a hint", async () => {
     const bridge = new BridgeServer({
       port: 1,
@@ -140,7 +148,13 @@ describe("ExtensionBackend", () => {
 
   it("forgets the least recently updated downloads beyond the cap", () => {
     const { backend, bridge } = setup();
-    const base = { type: "download", version: 1, url: "http://x/a", totalBytes: 1, filename: "" };
+    const base = {
+      type: "download",
+      version: PROTOCOL_VERSION,
+      url: "http://x/a",
+      totalBytes: 1,
+      filename: "",
+    };
     for (let id = 1; id <= MAX_TRACKED_DOWNLOADS + 5; id++) {
       bridge.emit("download", { ...base, downloadId: id, state: "in_progress", bytesReceived: 0 });
     }
@@ -158,7 +172,13 @@ describe("ExtensionBackend", () => {
     const { backend, bridge } = setup();
     const changed = vi.fn();
     backend.onDownloadsChanged(changed);
-    const base = { type: "download", version: 1, downloadId: 7, url: "http://x/a", totalBytes: 10 };
+    const base = {
+      type: "download",
+      version: PROTOCOL_VERSION,
+      downloadId: 7,
+      url: "http://x/a",
+      totalBytes: 10,
+    };
     bridge.emit("download", { ...base, filename: "", state: "in_progress", bytesReceived: 0 });
     bridge.emit("download", { ...base, filename: "/tmp/a", state: "complete", bytesReceived: 10 });
     const downloads = backend.listDownloads();

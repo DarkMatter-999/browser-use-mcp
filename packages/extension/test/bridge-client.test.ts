@@ -1,4 +1,4 @@
-import { BrowserUseError, type WireMessage } from "@browser-use/protocol";
+import { BrowserUseError, PROTOCOL_VERSION, type WireMessage } from "@browser-use/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BridgeClient, type BridgeState } from "../src/bridge/client";
 import { Settings } from "../src/bridge/settings";
@@ -28,7 +28,7 @@ async function ready(ctx = setup()) {
   await flush();
   const socket = socketAt(0);
   socket.open();
-  socket.receive({ type: "helloAck", version: 1, daemonVersion: "1.0.0" });
+  socket.receive({ type: "helloAck", version: PROTOCOL_VERSION, daemonVersion: "1.0.0" });
   await flush();
   return { ...ctx, socket };
 }
@@ -49,7 +49,7 @@ describe("BridgeClient connect", () => {
     expect(socket.url).toBe("ws://127.0.0.1:40000");
     expect(socket.messages()[0]).toMatchObject({
       type: "hello",
-      version: 1,
+      version: PROTOCOL_VERSION,
       token: TOKEN,
       extensionVersion: "0.0.0",
     });
@@ -68,7 +68,7 @@ describe("BridgeClient connect", () => {
     const { socket, messages } = await ready();
     socket.receive({
       type: "fileAccess",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: "11111111-1111-4111-8111-111111111111",
     });
     expect(messages).toHaveLength(1);
@@ -87,7 +87,7 @@ describe("heartbeat and reconnect", () => {
     const { socket } = await ready();
     await vi.advanceTimersByTimeAsync(20_000);
     expect(socket.messages().at(-1)).toMatchObject({ type: "ping" });
-    socket.receive({ type: "pong", version: 1 });
+    socket.receive({ type: "pong", version: PROTOCOL_VERSION });
     await vi.advanceTimersByTimeAsync(10_000);
     expect(socket.closeCode).toBeUndefined();
   });
@@ -118,7 +118,7 @@ describe("heartbeat and reconnect", () => {
     expect(FakeWebSocket.instances).toHaveLength(3);
     const third = socketAt(2);
     third.open();
-    third.receive({ type: "helloAck", version: 1, daemonVersion: "1" });
+    third.receive({ type: "helloAck", version: PROTOCOL_VERSION, daemonVersion: "1" });
     await flush();
     third.close();
     await vi.advanceTimersByTimeAsync(1_000);
@@ -147,7 +147,7 @@ describe("authentication failures", () => {
     const { client, socket, store } = await ready();
     socket.receive({
       type: "error",
-      version: 1,
+      version: PROTOCOL_VERSION,
       error: { code: "NOT_PAIRED", message: "Not paired" },
     });
     await flush();
@@ -180,7 +180,7 @@ describe("authentication failures", () => {
       await flush();
       const first = socketAt(0);
       first.open();
-      first.receive({ type: "error", version: 1, error: { code, message: text } });
+      first.receive({ type: "error", version: PROTOCOL_VERSION, error: { code, message: text } });
       await flush();
       first.close(1008);
       expect(store.data.token).toBe(TOKEN);
@@ -201,7 +201,7 @@ describe("authentication failures", () => {
     first.open();
     first.receive({
       type: "error",
-      version: 1,
+      version: PROTOCOL_VERSION,
       error: { code: "VERSION_MISMATCH", message: "update", hint: "same release" },
     });
     await flush();
@@ -222,8 +222,12 @@ describe("pair", () => {
     await flush();
     const pairing = socketAt(0);
     pairing.open();
-    expect(pairing.messages()[0]).toMatchObject({ type: "pair", version: 1, code: "ABCD2345" });
-    pairing.receive({ type: "paired", version: 1, token: TOKEN });
+    expect(pairing.messages()[0]).toMatchObject({
+      type: "pair",
+      version: PROTOCOL_VERSION,
+      code: "ABCD2345",
+    });
+    pairing.receive({ type: "paired", version: PROTOCOL_VERSION, token: TOKEN });
     await paired;
     expect(store.data.token).toBe(TOKEN);
     await flush();
@@ -242,7 +246,7 @@ describe("pair", () => {
     pairing.open();
     pairing.receive({
       type: "error",
-      version: 1,
+      version: PROTOCOL_VERSION,
       error: { code: "NOT_PAIRED", message: "Invalid or expired pairing code." },
     });
     await assertion;
@@ -271,18 +275,18 @@ describe("send", () => {
   it("throws BRIDGE_DISCONNECTED when not ready", () => {
     const { client } = setup();
     expect(() => {
-      client.send({ type: "ping", version: 1 });
+      client.send({ type: "ping", version: PROTOCOL_VERSION });
     }).toThrow(BrowserUseError);
   });
 
   it("serialises when ready and rejects over the 2 MiB limit", async () => {
     const { client, socket } = await ready();
-    client.send({ type: "ping", version: 1 });
+    client.send({ type: "ping", version: PROTOCOL_VERSION });
     expect(socket.messages().at(-1)).toMatchObject({ type: "ping" });
     expect(() => {
       client.send({
         type: "response",
-        version: 1,
+        version: PROTOCOL_VERSION,
         requestId: "11111111-1111-4111-8111-111111111111",
         result: "x".repeat(2 * 1024 * 1024),
       });
@@ -341,7 +345,7 @@ describe("explicit connection model", () => {
     await client.start();
     const first = client.waitForReady(5_000);
     socketAt(0).open();
-    socketAt(0).receive({ type: "helloAck", version: 1, daemonVersion: "1" });
+    socketAt(0).receive({ type: "helloAck", version: PROTOCOL_VERSION, daemonVersion: "1" });
     await expect(first).resolves.toBe("ready");
     await expect(client.waitForReady(5_000)).resolves.toBe("ready");
     socketAt(0).close();
@@ -362,7 +366,7 @@ describe("explicit connection model", () => {
     await flush();
     const pairing = socketAt(0);
     pairing.open();
-    pairing.receive({ type: "paired", version: 1, token: TOKEN });
+    pairing.receive({ type: "paired", version: PROTOCOL_VERSION, token: TOKEN });
     await paired;
     expect(store.data.token).toBe(TOKEN);
     expect(pairing.readyState).toBe(3);
@@ -395,7 +399,7 @@ describe("another browser holds the daemon (BRIDGE_IN_USE)", () => {
     first.open();
     first.receive({
       type: "error",
-      version: 1,
+      version: PROTOCOL_VERSION,
       error: { code: "BRIDGE_IN_USE", message: "Another browser is already connected." },
     });
     await flush();
@@ -422,7 +426,7 @@ describe("another browser holds the daemon (BRIDGE_IN_USE)", () => {
       expect(retry.messages()[0]).toMatchObject({ type: "hello", token: TOKEN });
       retry.receive({
         type: "error",
-        version: 1,
+        version: PROTOCOL_VERSION,
         error: { code: "BRIDGE_IN_USE", message: "Another browser is already connected." },
       });
       await flush();
@@ -438,7 +442,7 @@ describe("another browser holds the daemon (BRIDGE_IN_USE)", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     const retry = socketAt(-1);
     retry.open();
-    retry.receive({ type: "helloAck", version: 1, daemonVersion: "1" });
+    retry.receive({ type: "helloAck", version: PROTOCOL_VERSION, daemonVersion: "1" });
     await flush();
     expect(client.state).toBe("ready");
   });

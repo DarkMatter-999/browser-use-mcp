@@ -1,14 +1,23 @@
 import { unlink } from "node:fs/promises";
+import { join } from "node:path";
 import { BrowserUseError } from "@browser-use/protocol";
 import pkg from "../../package.json" with { type: "json" };
 import { canConnect, isPipe } from "../client/ensure-daemon";
-import { resolveExtensionId, resolvePaths, resolvePort } from "../config";
+import {
+  resolveBrowserConfig,
+  resolveExtensionId,
+  resolvePaths,
+  resolvePort,
+  resolveProfileDir,
+} from "../config";
 import { BridgeServer } from "./bridge-server";
+import { LaunchBackend } from "./launch-backend";
 import { ExtensionBackend } from "./extension-backend";
 import { IdleMonitor } from "./idle-monitor";
 import { IpcServer } from "./ipc-server";
 import { createLogger } from "./log";
 import { ensurePrivateHome } from "./private-home";
+import { initializeBrowserBackend } from "./select-backend";
 import {
   FailureLimiter,
   loadOrCreateToken,
@@ -24,46 +33,29 @@ export async function runDaemon(env: NodeJS.ProcessEnv = process.env): Promise<v
   await ensurePrivateHome(paths.home);
   const log = createLogger(paths.logFile);
   const port = resolvePort(env);
+  const browserConfig = resolveBrowserConfig(env);
   let token = await loadOrCreateToken(paths);
   const pairing = new PairingCodes();
   const limiter = new FailureLimiter();
-
-  const bridge = new BridgeServer({
-    port,
-    extensionId: resolveExtensionId(env),
-    daemonVersion: pkg.version,
-    auth: {
-      verifyToken: (candidate) => tokensEqual(candidate, token),
-      consumePairingCode: (code) => (pairing.consume(code) ? token : undefined),
-      limiter,
-    },
-    log,
-  });
-  const backend = new ExtensionBackend(bridge);
   let shuttingDown = false;
+  let selection: Awaited<ReturnType<typeof initializeBrowserBackend>> | undefined;
+  let ipc: IpcServer | undefined;
+  let extensionBridge: BridgeServer | undefined;
+  const idle = new IdleMonitor({
+    idleMs: IDLE_MS,
+    isBusy: () => (ipc?.clientCount ?? 0) > 0 || (selection?.backend.listTabs().length ?? 0) > 0,
+    onIdle: () => void shutdown(0),
+  });
 
   async function shutdown(code = 0): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     idle.stop();
-    await ipc.close();
-    await bridge.close();
+    await ipc?.close();
+    await selection?.close();
     await log.info("daemon stopped");
     process.exit(code);
   }
-
-  const ipc = new IpcServer({
-    backend,
-    pairing,
-    daemonVersion: pkg.version,
-    port,
-    rotateToken: async () => {
-      token = await resetToken(paths);
-      bridge.disconnectPeer();
-    },
-    onShutdown: () => void shutdown(0),
-    log,
-  });
 
   if (await canConnect(paths.ipcEndpoint)) {
     await log.info("another daemon is already running; exiting");
@@ -71,21 +63,59 @@ export async function runDaemon(env: NodeJS.ProcessEnv = process.env): Promise<v
   }
   try {
     if (!isPipe(paths.ipcEndpoint)) await unlink(paths.ipcEndpoint).catch(() => undefined);
-    await bridge.start();
+    selection = await initializeBrowserBackend(browserConfig, {
+      createBridge: () => {
+        extensionBridge = new BridgeServer({
+          port,
+          extensionId: resolveExtensionId(env),
+          daemonVersion: pkg.version,
+          auth: {
+            verifyToken: (candidate) => tokensEqual(candidate, token),
+            consumePairingCode: (code) => (pairing.consume(code) ? token : undefined),
+            limiter,
+          },
+          log,
+        });
+        return extensionBridge;
+      },
+      createExtensionBackend: (bridge) => new ExtensionBackend(bridge as BridgeServer),
+      createLaunchBackend: () =>
+        LaunchBackend.create({
+          profile: browserConfig.profile,
+          profileDir: resolveProfileDir(paths, "default") ?? join(paths.home, "profile"),
+          ...(browserConfig.executablePath === undefined
+            ? {}
+            : { executablePath: browserConfig.executablePath }),
+          downloadDir: join(paths.home, "downloads"),
+        }),
+    });
+    if (selection.fallbackReason) await log.info(selection.fallbackReason);
+    ipc = new IpcServer({
+      backend: selection.backend,
+      browserConfig,
+      ...(selection.fallbackReason === undefined
+        ? {}
+        : { fallbackReason: selection.fallbackReason }),
+      pairing,
+      daemonVersion: pkg.version,
+      port,
+      rotateToken: async () => {
+        token = await resetToken(paths);
+        extensionBridge?.disconnectPeer();
+      },
+      onShutdown: () => void shutdown(0),
+      log,
+    });
     await ipc.listen(paths.ipcEndpoint);
   } catch (error) {
     const message =
       error instanceof BrowserUseError ? `${error.message} (${error.hint ?? ""})` : String(error);
     await log.error(`failed to start: ${message}`);
-    await bridge.close().catch(() => undefined);
+    await ipc?.close().catch(() => undefined);
+    await selection?.close().catch(() => undefined);
     process.exit(1);
   }
 
-  const idle = new IdleMonitor({
-    idleMs: IDLE_MS,
-    isBusy: () => ipc.clientCount > 0 || backend.listTabs().length > 0,
-    onIdle: () => void shutdown(0),
-  });
   idle.start();
   process.once("SIGINT", () => void shutdown(0));
   process.once("SIGTERM", () => void shutdown(0));

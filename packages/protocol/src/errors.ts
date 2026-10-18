@@ -19,6 +19,8 @@ export const ERROR_CODES = [
   "NAVIGATION_FAILED",
   "LIMIT_EXCEEDED",
   "BRIDGE_IN_USE",
+  "CONFIG_MISMATCH",
+  "UNSUPPORTED_CAPABILITY",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

@@ -29,6 +29,9 @@ describe("tab tools", () => {
       extensionConnected: true,
       tabs: [],
       mode: "extension" as const,
+      requestedMode: "extension" as const,
+      profile: "default" as const,
+      capabilities: { cdp: true, downloads: true, dialogs: true, fileAccess: true, pointer: true },
     };
     const ctx = makeContext({ status: () => Promise.resolve(status) });
     expect(parse(await tool("browser_status").run(ctx, {}))).toMatchObject({
@@ -58,6 +61,15 @@ describe("tab tools", () => {
           extensionConnected: true,
           tabs,
           mode: "extension" as const,
+          requestedMode: "extension" as const,
+          profile: "default" as const,
+          capabilities: {
+            cdp: true,
+            downloads: true,
+            dialogs: true,
+            fileAccess: true,
+            pointer: true,
+          },
         }),
     });
     // The daemon's answer wins over the (possibly stale) cached list.

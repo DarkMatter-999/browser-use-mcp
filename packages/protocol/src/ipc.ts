@@ -12,6 +12,33 @@ const id = z.number().int().nonnegative();
 const tabId = z.number().int().positive();
 const subscriptionId = z.uuid();
 
+export const browserModeSchema = z.enum(["extension", "headless", "auto"]);
+export const actualBrowserModeSchema = z.enum(["extension", "headless"]);
+export const browserProfileSchema = z.enum(["default", "guest"]);
+export const browserConfigSchema = z.object({
+  mode: browserModeSchema,
+  profile: browserProfileSchema,
+  executablePath: z.string().min(1).optional(),
+});
+export type BrowserConfig = z.infer<typeof browserConfigSchema>;
+
+export const effectiveBrowserConfigSchema = z.object({
+  mode: actualBrowserModeSchema,
+  profile: browserProfileSchema,
+  executablePath: z.string().min(1).optional(),
+  browserName: z.string().min(1).optional(),
+});
+export type EffectiveBrowserConfig = z.infer<typeof effectiveBrowserConfigSchema>;
+
+export const backendCapabilitiesSchema = z.object({
+  cdp: z.boolean(),
+  downloads: z.boolean(),
+  dialogs: z.boolean(),
+  fileAccess: z.boolean(),
+  pointer: z.boolean(),
+});
+export type BackendCapabilities = z.infer<typeof backendCapabilitiesSchema>;
+
 export const downloadInfoSchema = z.object({
   downloadId: z.number().int().nonnegative(),
   filename: z.string(),
@@ -31,7 +58,18 @@ export const daemonStatusSchema = z.object({
   paired: z.boolean(),
   extensionConnected: z.boolean(),
   tabs: z.array(connectedTabSchema),
-  mode: z.literal("extension"),
+  mode: actualBrowserModeSchema,
+  requestedMode: browserModeSchema.default("extension"),
+  profile: browserProfileSchema.default("default"),
+  browserName: z.string().min(1).optional(),
+  fallbackReason: z.string().min(1).optional(),
+  capabilities: backendCapabilitiesSchema.default({
+    cdp: true,
+    downloads: true,
+    dialogs: true,
+    fileAccess: true,
+    pointer: true,
+  }),
 });
 export type DaemonStatus = z.infer<typeof daemonStatusSchema>;
 
@@ -39,6 +77,7 @@ const ipcHelloSchema = z.object({
   type: z.literal("hello"),
   protocolVersion,
   clientVersion: z.string().min(1),
+  browserConfig: browserConfigSchema.default({ mode: "extension", profile: "default" }),
 });
 
 export const ipcClientMessageSchema = z.discriminatedUnion("type", [
@@ -72,6 +111,11 @@ export const ipcServerMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("helloAck"),
     protocolVersion,
     daemonVersion: z.string().min(1),
+    effectiveBrowserConfig: effectiveBrowserConfigSchema.default({
+      mode: "extension",
+      profile: "default",
+    }),
+    error: errorPayloadSchema.optional(),
   }),
   z.object({ type: z.literal("result"), id, value: jsonValueSchema }),
   z.object({ type: z.literal("failure"), id, error: errorPayloadSchema }),

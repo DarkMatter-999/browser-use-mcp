@@ -5,6 +5,15 @@ import { BrowserUseError, EXTENSION_ID } from "@browser-use/protocol";
 
 export const DEFAULT_BRIDGE_PORT = 38241;
 
+export type BrowserMode = "extension" | "headless" | "auto";
+export type BrowserProfile = "default" | "guest";
+
+export interface BrowserConfig {
+  mode: BrowserMode;
+  profile: BrowserProfile;
+  executablePath?: string;
+}
+
 export interface Paths {
   home: string;
   tokenFile: string;
@@ -31,6 +40,53 @@ export function resolvePaths(
     lockFile: join(home, "daemon-start.lock"),
     ipcEndpoint,
   };
+}
+
+export function resolveBrowserConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  cwd = process.cwd(),
+): BrowserConfig {
+  const rawMode =
+    env.BROWSER_USE_MODE === undefined || env.BROWSER_USE_MODE === ""
+      ? "extension"
+      : env.BROWSER_USE_MODE;
+  if (rawMode !== "extension" && rawMode !== "headless" && rawMode !== "auto") {
+    throw new BrowserUseError(
+      "INVALID_ARGUMENT",
+      `BROWSER_USE_MODE must be extension, headless, or auto (got "${rawMode}")`,
+    );
+  }
+
+  const rawProfile =
+    env.BROWSER_USE_PROFILE === undefined || env.BROWSER_USE_PROFILE === ""
+      ? "default"
+      : env.BROWSER_USE_PROFILE;
+  if (rawProfile !== "default" && rawProfile !== "guest") {
+    throw new BrowserUseError(
+      "INVALID_ARGUMENT",
+      `BROWSER_USE_PROFILE must be default or guest (got "${rawProfile}")`,
+    );
+  }
+
+  const rawExecutablePath = env.BROWSER_USE_CHROME_PATH?.trim();
+  const pathOps = platform === "win32" ? win32 : posix;
+  const executablePath = rawExecutablePath ? pathOps.resolve(cwd, rawExecutablePath) : undefined;
+  return {
+    mode: rawMode,
+    profile: rawProfile,
+    ...(executablePath ? { executablePath } : {}),
+  };
+}
+
+export function resolveProfileDir(
+  paths: Paths,
+  profile: BrowserProfile,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (profile === "guest") return undefined;
+  const { join } = platform === "win32" ? win32 : posix;
+  return join(paths.home, "profile");
 }
 
 export function resolvePort(env: NodeJS.ProcessEnv = process.env): number {

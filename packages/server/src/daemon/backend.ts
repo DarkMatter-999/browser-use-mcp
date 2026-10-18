@@ -1,9 +1,19 @@
-import type { ConnectedTab, DownloadInfo, JsonObject, JsonValue } from "@browser-use/protocol";
+import type {
+  BackendCapabilities,
+  ConnectedTab,
+  DownloadInfo,
+  JsonObject,
+  JsonValue,
+} from "@browser-use/protocol";
 
 export type CdpEventListener = (method: string, params: JsonObject) => void;
 
 export interface BrowserBackend {
-  readonly kind: "extension";
+  readonly kind: "extension" | "headless";
+  readonly capabilities: BackendCapabilities;
+  readonly browserName?: string;
+  /** Release resources owned by this backend. ExtensionBackend does not own the bridge. */
+  close(): Promise<void>;
   isConnected(): boolean;
   listTabs(): ConnectedTab[];
   listDownloads(): DownloadInfo[];

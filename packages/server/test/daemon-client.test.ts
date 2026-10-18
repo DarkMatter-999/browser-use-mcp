@@ -36,6 +36,132 @@ describe("DaemonClient", () => {
     ).rejects.toMatchObject({ code: "BRIDGE_DISCONNECTED" });
   });
 
+  it("allows headless startup time for the daemon to launch its browser", async () => {
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { resolvePaths } = await import("../src/config");
+    const paths = resolvePaths({ BROWSER_USE_HOME: await mkdtemp(join(tmpdir(), "bu-startup-")) });
+    let started: Daemon | undefined;
+    const browserConfig = { mode: "headless" as const, profile: "default" as const };
+    const spawnDaemon = vi.fn(() => {
+      setTimeout(() => {
+        void startInProcessDaemon("1.0.0", {
+          paths,
+          backendKind: "headless",
+          browserConfig,
+        }).then((value) => {
+          started = value;
+        });
+      }, 5100);
+    });
+    try {
+      client = await DaemonClient.connect({
+        paths,
+        clientVersion: "1.0.0",
+        entryScript: "unused",
+        spawnDaemon,
+        browserConfig,
+      });
+      expect(await client.status()).toMatchObject({ mode: "headless" });
+      expect(spawnDaemon).toHaveBeenCalledOnce();
+    } finally {
+      client?.close();
+      client = undefined;
+      await started?.stop();
+      await rm(paths.home, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it("surfaces a configuration mismatch returned during the hello handshake", async () => {
+    daemon = await startInProcessDaemon();
+    await expect(
+      DaemonClient.connect({
+        paths: daemon.paths,
+        clientVersion: "1.0.0",
+        entryScript: "unused",
+        autostart: false,
+        browserConfig: { mode: "headless", profile: "guest" },
+      }),
+    ).rejects.toMatchObject({ code: "CONFIG_MISMATCH" });
+  });
+
+  it("rejects a legacy daemon acknowledgment for explicit headless settings", async () => {
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { resolvePaths } = await import("../src/config");
+    const paths = resolvePaths({ BROWSER_USE_HOME: await mkdtemp(join(tmpdir(), "bu-legacy-")) });
+    const server = net.createServer((socket) => {
+      socket.setEncoding("utf8");
+      socket.on("data", () => {
+        socket.write(
+          `${JSON.stringify({ type: "helloAck", protocolVersion: 1, daemonVersion: "0.0.0" })}\n`,
+        );
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(paths.ipcEndpoint, resolve));
+    try {
+      await expect(
+        DaemonClient.connect({
+          paths,
+          clientVersion: "1.0.0",
+          entryScript: "unused",
+          autostart: false,
+          browserConfig: { mode: "headless", profile: "default" },
+        }),
+      ).rejects.toMatchObject({ code: "CONFIG_MISMATCH" });
+    } finally {
+      await new Promise<void>((resolve) =>
+        server.close(() => {
+          resolve();
+        }),
+      );
+      await rm(paths.home, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a legacy daemon acknowledgment for a different executable path", async () => {
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { resolvePaths } = await import("../src/config");
+    const paths = resolvePaths({
+      BROWSER_USE_HOME: await mkdtemp(join(tmpdir(), "bu-path-legacy-")),
+    });
+    const server = net.createServer((socket) => {
+      socket.setEncoding("utf8");
+      socket.on("data", () => {
+        socket.write(
+          `${JSON.stringify({ type: "helloAck", protocolVersion: 1, daemonVersion: "0.0.0" })}\n`,
+        );
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(paths.ipcEndpoint, resolve));
+    try {
+      await expect(
+        DaemonClient.connect({
+          paths,
+          clientVersion: "0.0.0",
+          entryScript: "unused",
+          autostart: false,
+          browserConfig: {
+            mode: "extension",
+            profile: "default",
+            executablePath: "/opt/browser/chromium",
+          },
+        }),
+      ).rejects.toMatchObject({ code: "CONFIG_MISMATCH" });
+    } finally {
+      await new Promise<void>((resolve) =>
+        server.close(() => {
+          resolve();
+        }),
+      );
+      await rm(paths.home, { recursive: true, force: true });
+    }
+  });
+
   it("keeps listTabs fresh from pushed state and exposes status", async () => {
     const { daemon, client } = await connect();
     daemon.backend.tabs = [{ tabId: 4, url: "https://a/", title: "A" }];
@@ -93,6 +219,46 @@ describe("DaemonClient", () => {
     expect(spawnDaemon).toHaveBeenCalledTimes(1);
     expect(old.shutdowns).toBe(1);
     expect((await client.status()).daemonVersion).toBe("2.0.0");
+    client.close();
+    client = undefined;
+    await replacement?.stop();
+  });
+
+  it("re-sends the configured headless settings after a daemon version restart", async () => {
+    const browserConfig = { mode: "headless" as const, profile: "guest" as const };
+    daemon = await startInProcessDaemon("1.0.0", {
+      closeOnShutdown: true,
+      backendKind: "headless",
+      browserConfig,
+    });
+    const old = daemon;
+    const { paths } = old;
+    let replacement: Daemon | undefined;
+    const spawnDaemon = vi.fn(() => {
+      void startInProcessDaemon("2.0.0", {
+        paths,
+        closeOnShutdown: true,
+        backendKind: "headless",
+        browserConfig,
+      }).then((started) => {
+        replacement = started;
+      });
+    });
+
+    client = await DaemonClient.connect({
+      paths,
+      clientVersion: "2.0.0",
+      entryScript: "x",
+      spawnDaemon,
+      browserConfig,
+    });
+
+    expect(await client.status()).toMatchObject({
+      mode: "headless",
+      requestedMode: "headless",
+      profile: "guest",
+    });
+    expect(spawnDaemon).toHaveBeenCalledOnce();
     client.close();
     client = undefined;
     await replacement?.stop();

@@ -34,6 +34,13 @@ function dialogOpenError(dialog: PendingDialog): BrowserUseError {
 
 export class ExtensionBackend implements BrowserBackend {
   readonly kind = "extension" as const;
+  readonly capabilities = {
+    cdp: true,
+    downloads: true,
+    dialogs: true,
+    fileAccess: true,
+    pointer: true,
+  } as const;
   readonly #bridge: BridgeServer;
   readonly #dialogs = new DialogTracker();
   readonly #subscribers = new Map<number, Set<CdpEventListener>>();
@@ -65,6 +72,10 @@ export class ExtensionBackend implements BrowserBackend {
     bridge.on("download", (message: DownloadMessage) => {
       this.#onDownload(message);
     });
+  }
+
+  async close(): Promise<void> {
+    // The daemon owns and closes BridgeServer separately; this backend owns no external process.
   }
 
   isConnected(): boolean {

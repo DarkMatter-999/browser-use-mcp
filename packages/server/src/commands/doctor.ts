@@ -1,6 +1,12 @@
 import { access, constants, readFile, stat } from "node:fs/promises";
 import net from "node:net";
-import { resolveExtensionId, resolvePort } from "../config";
+import {
+  resolveBrowserConfig,
+  resolveExtensionId,
+  resolvePort,
+  type BrowserConfig,
+} from "../config";
+import { discoverBrowser } from "../daemon/browser-discovery";
 import { type CommandContext, connectExisting } from "./context";
 
 type Level = "ok" | "warn" | "fail";
@@ -60,8 +66,45 @@ async function checkToken(ctx: CommandContext): Promise<Check> {
   };
 }
 
+async function checkBrowser(ctx: CommandContext, config: BrowserConfig): Promise<Check> {
+  try {
+    const env =
+      config.executablePath === undefined
+        ? ctx.env
+        : { ...ctx.env, BROWSER_USE_CHROME_PATH: config.executablePath };
+    const browser = await discoverBrowser(process.platform, env);
+    return {
+      level: "ok",
+      name: "browser",
+      detail: `${browser.browserName} (${browser.executablePath})`,
+    };
+  } catch (error) {
+    return {
+      level: "fail",
+      name: "browser",
+      detail: error instanceof Error ? error.message : String(error),
+      fix:
+        error && typeof error === "object" && "hint" in error && typeof error.hint === "string"
+          ? error.hint
+          : "Install Chrome, Chromium, Edge, or Brave, or set BROWSER_USE_CHROME_PATH.",
+    };
+  }
+}
+
 export async function runDoctor(ctx: CommandContext): Promise<number> {
   const checks: Check[] = [];
+  let browserConfig: BrowserConfig;
+  try {
+    browserConfig = resolveBrowserConfig(ctx.env);
+  } catch (error) {
+    checks.push({
+      level: "fail",
+      name: "browser-config",
+      detail: error instanceof Error ? error.message : String(error),
+      fix: "Set BROWSER_USE_MODE to extension, headless, or auto and BROWSER_USE_PROFILE to default or guest.",
+    });
+    browserConfig = { mode: "extension", profile: "default" };
+  }
   const major = Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10);
   checks.push(
     major >= 20
@@ -75,6 +118,7 @@ export async function runDoctor(ctx: CommandContext): Promise<number> {
   );
   checks.push(await checkStateDir(ctx));
   checks.push(await checkToken(ctx));
+  if (browserConfig.mode !== "extension") checks.push(await checkBrowser(ctx, browserConfig));
 
   const client = await connectExisting(ctx);
   let status: Awaited<ReturnType<NonNullable<typeof client>["status"]>> | undefined;
@@ -89,18 +133,26 @@ export async function runDoctor(ctx: CommandContext): Promise<number> {
   }
   if (status) {
     checks.push({ level: "ok", name: "daemon", detail: `running (pid ${status.pid})` });
-    checks.push(
-      status.extensionConnected
-        ? { level: "ok", name: "extension", detail: "connected" }
-        : {
-            // Expected, not an error: the extension only connects while a tab is connected or
-            // "Let the agent open tabs" is on (spec section 10).
-            level: "warn",
-            name: "extension",
-            detail: "not connected (normal while no tabs are connected)",
-            fix: 'Connect a tab from the Browser Use popup, or turn on "Let the agent open tabs" in its Settings. If the popup says Not paired, enter the code from `browseruse-mcp pair`.',
-          },
-    );
+    checks.push({
+      level: "ok",
+      name: "browser-mode",
+      detail: `${status.mode} (requested ${status.requestedMode}, profile ${status.profile})${status.browserName ? `, ${status.browserName}` : ""}`,
+    });
+    if (status.mode === "headless") {
+      checks.push({ level: "ok", name: "extension", detail: "not used (headless mode)" });
+    } else {
+      checks.push(
+        status.extensionConnected
+          ? { level: "ok", name: "extension", detail: "connected" }
+          : {
+              // Expected: the extension connects only while a tab is connected or keep-connected is on.
+              level: "warn",
+              name: "extension",
+              detail: "not connected (normal while no tabs are connected)",
+              fix: 'Connect a tab from the Browser Use popup, or turn on "Let the agent open tabs" in its Settings. If the popup says Not paired, enter the code from `browseruse-mcp pair`.',
+            },
+      );
+    }
   } else {
     checks.push({
       level: "warn",
@@ -108,40 +160,46 @@ export async function runDoctor(ctx: CommandContext): Promise<number> {
       detail: "not running",
       fix: "It starts automatically when an MCP client connects, or run `browseruse-mcp pair`.",
     });
-    checks.push({
-      level: "warn",
-      name: "extension",
-      detail: "unknown (daemon not running)",
-      fix: "Start the daemon with `browseruse-mcp pair`, then pair the extension.",
-    });
+    checks.push(
+      browserConfig.mode === "headless"
+        ? { level: "ok", name: "extension", detail: "not used in headless mode" }
+        : {
+            level: "warn",
+            name: "extension",
+            detail: "unknown (daemon not running)",
+            fix: "Start the daemon with `browseruse-mcp pair`, then pair the extension.",
+          },
+    );
   }
 
-  let port: number | undefined;
-  try {
-    port = resolvePort(ctx.env);
-  } catch (error) {
-    checks.push({
-      level: "fail",
-      name: "port",
-      detail: error instanceof Error ? error.message : String(error),
-      fix: "Set BROWSER_USE_PORT to a valid port number.",
-    });
-  }
-  if (port !== undefined) {
-    if (status) {
-      checks.push({ level: "ok", name: "port", detail: `127.0.0.1:${status.port} (daemon)` });
-    } else if (await portInUse(port)) {
+  if (browserConfig.mode !== "headless") {
+    let port: number | undefined;
+    try {
+      port = resolvePort(ctx.env);
+    } catch (error) {
       checks.push({
         level: "fail",
         name: "port",
-        detail: `127.0.0.1:${port} is in use by another process`,
-        fix: "Free the port or set BROWSER_USE_PORT to a different one (also in the extension).",
+        detail: error instanceof Error ? error.message : String(error),
+        fix: "Set BROWSER_USE_PORT to a valid port number.",
       });
-    } else {
-      checks.push({ level: "ok", name: "port", detail: `127.0.0.1:${port} is free` });
     }
+    if (port !== undefined) {
+      if (status) {
+        checks.push({ level: "ok", name: "port", detail: `127.0.0.1:${status.port} (daemon)` });
+      } else if (await portInUse(port)) {
+        checks.push({
+          level: "fail",
+          name: "port",
+          detail: `127.0.0.1:${port} is in use by another process`,
+          fix: "Free the port or set BROWSER_USE_PORT to a different one (also in the extension).",
+        });
+      } else {
+        checks.push({ level: "ok", name: "port", detail: `127.0.0.1:${port} is free` });
+      }
+    }
+    checks.push({ level: "ok", name: "extension-id", detail: resolveExtensionId(ctx.env) });
   }
-  checks.push({ level: "ok", name: "extension-id", detail: resolveExtensionId(ctx.env) });
 
   const lines = checks.map((check) => {
     const base = `${check.level.padEnd(5)} ${check.name.padEnd(13)} ${check.detail}`;

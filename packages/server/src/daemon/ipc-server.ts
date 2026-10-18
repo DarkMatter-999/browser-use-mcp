@@ -2,7 +2,9 @@ import { chmod, unlink } from "node:fs/promises";
 import net from "node:net";
 import {
   BrowserUseError,
+  type BrowserConfig,
   type DaemonStatus,
+  type EffectiveBrowserConfig,
   type IpcClientMessage,
   type IpcServerMessage,
   type JsonValue,
@@ -19,6 +21,8 @@ import type { PairingCodes } from "./token-store";
 
 export interface DaemonDeps {
   backend: BrowserBackend;
+  browserConfig?: BrowserConfig;
+  fallbackReason?: string;
   pairing: PairingCodes;
   daemonVersion: string;
   port: number;
@@ -112,15 +116,58 @@ export class IpcServer {
 
   #status(): DaemonStatus {
     const { backend, daemonVersion, port } = this.#deps;
+    const browserConfig = this.#browserConfig();
     return {
       daemonVersion,
       pid: process.pid,
       port,
       paired: true,
-      extensionConnected: backend.isConnected(),
+      extensionConnected: backend.kind === "extension" && backend.isConnected(),
       tabs: backend.listTabs(),
-      mode: "extension",
+      mode: backend.kind,
+      requestedMode: browserConfig.mode,
+      profile: browserConfig.profile,
+      ...(backend.browserName === undefined ? {} : { browserName: backend.browserName }),
+      ...(this.#deps.fallbackReason === undefined
+        ? {}
+        : { fallbackReason: this.#deps.fallbackReason }),
+      capabilities: backend.capabilities,
     };
+  }
+
+  #browserConfig(): BrowserConfig {
+    return this.#deps.browserConfig ?? { mode: "extension", profile: "default" };
+  }
+
+  #effectiveBrowserConfig(): EffectiveBrowserConfig {
+    const browserConfig = this.#browserConfig();
+    const { backend } = this.#deps;
+    return {
+      mode: backend.kind,
+      profile: browserConfig.profile,
+      ...(browserConfig.executablePath === undefined
+        ? {}
+        : { executablePath: browserConfig.executablePath }),
+      ...(backend.browserName === undefined ? {} : { browserName: backend.browserName }),
+    };
+  }
+
+  #configurationError(requested: BrowserConfig): BrowserUseError | undefined {
+    const actual = this.#browserConfig();
+    if (
+      requested.mode === actual.mode &&
+      requested.profile === actual.profile &&
+      requested.executablePath === actual.executablePath
+    ) {
+      return undefined;
+    }
+    return new BrowserUseError(
+      "CONFIG_MISMATCH",
+      "The running Browser Use daemon uses different browser settings",
+      {
+        hint: "Stop the daemon, then restart it with matching MCP config.",
+      },
+    );
   }
 
   #onConnection(socket: net.Socket): void {
@@ -277,12 +324,19 @@ export class IpcServer {
             drop(`${message.type} before hello`);
             return;
           }
-          greeted = true;
+          const configError = this.#configurationError(message.browserConfig);
           write({
             type: "helloAck",
             protocolVersion: PROTOCOL_VERSION,
             daemonVersion: this.#deps.daemonVersion,
+            effectiveBrowserConfig: this.#effectiveBrowserConfig(),
+            ...(configError === undefined ? {} : { error: configError.toPayload() }),
           });
+          if (configError) {
+            socket.end();
+            return;
+          }
+          greeted = true;
           write({ type: "tabsChanged", tabs: this.#deps.backend.listTabs() });
           continue;
         }

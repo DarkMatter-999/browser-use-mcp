@@ -9,6 +9,7 @@ export type SpawnDaemon = (entryScript: string, env: NodeJS.ProcessEnv) => void;
 
 export interface EnsureDaemonDeps {
   spawnDaemon?: SpawnDaemon;
+  env?: NodeJS.ProcessEnv;
   lockStaleMs?: number;
   startupTimeoutMs?: number;
   /** Written into the start lock so a stuck lock can be attributed. */
@@ -97,7 +98,7 @@ async function spawnAndWait(
   const startupTimeoutMs = deps.startupTimeoutMs ?? 5_000;
   // The connect just failed, so any socket file is stale; never unlink a live one.
   if (!isPipe(paths.ipcEndpoint)) await unlink(paths.ipcEndpoint).catch(() => undefined);
-  (deps.spawnDaemon ?? defaultSpawn)(entryScript, process.env);
+  (deps.spawnDaemon ?? defaultSpawn)(entryScript, deps.env ?? process.env);
   const until = Date.now() + startupTimeoutMs;
   while (Date.now() < until) {
     if (await canConnect(paths.ipcEndpoint)) return;

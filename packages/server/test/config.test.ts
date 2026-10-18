@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_BRIDGE_PORT,
   pointerEnabled,
+  resolveBrowserConfig,
   resolveExtensionId,
   resolvePaths,
   resolvePort,
+  resolveProfileDir,
 } from "../src/config";
 
 describe("resolvePaths", () => {
@@ -42,5 +44,78 @@ describe("misc settings", () => {
   it("enables the pointer unless BROWSER_USE_POINTER=0", () => {
     expect(pointerEnabled({})).toBe(true);
     expect(pointerEnabled({ BROWSER_USE_POINTER: "0" })).toBe(false);
+  });
+});
+
+describe("resolveBrowserConfig", () => {
+  it("defaults to extension mode and the dedicated persistent profile", () => {
+    const config = resolveBrowserConfig({});
+    expect(config).toEqual({ mode: "extension", profile: "default" });
+    expect(
+      resolveProfileDir(resolvePaths({ BROWSER_USE_HOME: "/tmp/bu-home" }), "default", "linux"),
+    ).toBe("/tmp/bu-home/profile");
+  });
+
+  it("accepts every supported mode and profile", () => {
+    expect(
+      resolveBrowserConfig({ BROWSER_USE_MODE: "headless", BROWSER_USE_PROFILE: "guest" }),
+    ).toEqual({ mode: "headless", profile: "guest" });
+    expect(
+      resolveBrowserConfig({ BROWSER_USE_MODE: "auto", BROWSER_USE_PROFILE: "default" }),
+    ).toEqual({ mode: "auto", profile: "default" });
+    expect(
+      resolveBrowserConfig({ BROWSER_USE_MODE: "extension", BROWSER_USE_PROFILE: "guest" }),
+    ).toEqual({ mode: "extension", profile: "guest" });
+  });
+
+  it("treats empty settings as defaults and exposes an explicit executable override", () => {
+    expect(
+      resolveBrowserConfig({
+        BROWSER_USE_MODE: "",
+        BROWSER_USE_PROFILE: "",
+        BROWSER_USE_CHROME_PATH: "/usr/bin/chromium",
+      }),
+    ).toEqual({
+      mode: "extension",
+      profile: "default",
+      executablePath: "/usr/bin/chromium",
+    });
+  });
+
+  it("normalizes a relative browser executable path against the MCP process cwd", () => {
+    expect(
+      resolveBrowserConfig({ BROWSER_USE_CHROME_PATH: "./bin/chromium" }, "linux", "/work/mcp"),
+    ).toEqual({
+      mode: "extension",
+      profile: "default",
+      executablePath: "/work/mcp/bin/chromium",
+    });
+  });
+
+  it("rejects unsupported modes and profiles", () => {
+    expect(() => resolveBrowserConfig({ BROWSER_USE_MODE: "auto-ish" })).toThrow(
+      /BROWSER_USE_MODE/,
+    );
+    expect(() => resolveBrowserConfig({ BROWSER_USE_PROFILE: "private" })).toThrow(
+      /BROWSER_USE_PROFILE/,
+    );
+  });
+});
+
+describe("resolveProfileDir", () => {
+  it("keeps the guest profile separate from persistent state", () => {
+    expect(
+      resolveProfileDir(resolvePaths({ BROWSER_USE_HOME: "/tmp/bu-home" }), "guest", "linux"),
+    ).toBeUndefined();
+  });
+
+  it("uses the target platform's path rules for the dedicated profile", () => {
+    expect(
+      resolveProfileDir(
+        resolvePaths({ BROWSER_USE_HOME: "C:\\bu-home" }, "win32"),
+        "default",
+        "win32",
+      ),
+    ).toBe("C:\\bu-home\\profile");
   });
 });

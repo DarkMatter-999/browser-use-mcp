@@ -1,6 +1,7 @@
 import {
   BrowserUseError,
   MAX_WIRE_MESSAGE_BYTES,
+  PROTOCOL_VERSION,
   serializeWireMessage,
   type WireMessage,
 } from "@browser-use/protocol";
@@ -130,7 +131,7 @@ describe("bridge commands", () => {
   describe("input commands on background tabs", () => {
     const cmd = (method: string): WireMessage => ({
       type: "command",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: rid,
       tabId: 7,
       method,
@@ -186,14 +187,19 @@ describe("bridge commands", () => {
     const { controller, adapter, sent } = await connected();
     await controller.onBridgeMessage({
       type: "command",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: rid,
       tabId: 7,
       method: "Runtime.evaluate",
       params: { expression: "1" },
     });
     expect(adapter.sendCommand).toHaveBeenCalledWith(7, "Runtime.evaluate", { expression: "1" });
-    expect(sent[0]).toEqual({ type: "response", version: 1, requestId: rid, result: { value: 1 } });
+    expect(sent[0]).toEqual({
+      type: "response",
+      version: PROTOCOL_VERSION,
+      requestId: rid,
+      result: { value: 1 },
+    });
   });
 
   it("answers LIMIT_EXCEEDED when the result is over the 2 MiB bridge limit", async () => {
@@ -209,7 +215,7 @@ describe("bridge commands", () => {
     adapter.sendCommand.mockResolvedValueOnce({ value: "x".repeat(MAX_WIRE_MESSAGE_BYTES) });
     await controller.onBridgeMessage({
       type: "command",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: rid,
       tabId: 7,
       method: "Accessibility.getFullAXTree",
@@ -232,7 +238,7 @@ describe("bridge commands", () => {
     adapter.sendCommand.mockRejectedValueOnce(new Error(""));
     await controller.onBridgeMessage({
       type: "command",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: rid,
       tabId: 7,
       method: "Runtime.evaluate",
@@ -246,7 +252,7 @@ describe("bridge commands", () => {
     const { controller, sent } = await connected();
     await controller.onBridgeMessage({
       type: "command",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: rid,
       tabId: 99,
       method: "Page.reload",
@@ -268,7 +274,7 @@ describe("bridge commands", () => {
     for (const id of [rid, "22222222-2222-4222-8222-222222222222"]) {
       await controller.onBridgeMessage({
         type: "command",
-        version: 1,
+        version: PROTOCOL_VERSION,
         requestId: id,
         tabId: 7,
         method: "Page.reload",
@@ -289,7 +295,7 @@ describe("bridge commands", () => {
     });
     await controller.onBridgeMessage({
       type: "openTab",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: rid,
       url: "https://example.com/",
     });
@@ -302,7 +308,7 @@ describe("bridge commands", () => {
     const { controller, tabs, adapter, sent, addToGroup } = setup();
     await controller.onBridgeMessage({
       type: "openTab",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: rid,
       url: "https://example.com/",
     });
@@ -315,7 +321,7 @@ describe("bridge commands", () => {
     });
     expect(sent.at(-1)).toEqual({
       type: "response",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: rid,
       result: { tabId: 50 },
     });
@@ -327,7 +333,7 @@ describe("bridge commands", () => {
     });
     await controller.onBridgeMessage({
       type: "openTab",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: rid,
       url: "https://example.com/",
     });
@@ -336,18 +342,32 @@ describe("bridge commands", () => {
 
   it("closes only connected tabs", async () => {
     const { controller, tabs, sent } = await connected();
-    await controller.onBridgeMessage({ type: "closeTab", version: 1, requestId: rid, tabId: 99 });
+    await controller.onBridgeMessage({
+      type: "closeTab",
+      version: PROTOCOL_VERSION,
+      requestId: rid,
+      tabId: 99,
+    });
     expect(sent[0]).toMatchObject({ type: "error", error: { code: "TAB_NOT_CONNECTED" } });
-    await controller.onBridgeMessage({ type: "closeTab", version: 1, requestId: rid, tabId: 7 });
+    await controller.onBridgeMessage({
+      type: "closeTab",
+      version: PROTOCOL_VERSION,
+      requestId: rid,
+      tabId: 7,
+    });
     expect(tabs.remove).toHaveBeenCalledWith(7);
   });
 
   it("reports file access", async () => {
     const { controller, sent } = setup();
-    await controller.onBridgeMessage({ type: "fileAccess", version: 1, requestId: rid });
+    await controller.onBridgeMessage({
+      type: "fileAccess",
+      version: PROTOCOL_VERSION,
+      requestId: rid,
+    });
     expect(sent[0]).toEqual({
       type: "response",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: rid,
       result: { allowed: true },
     });
@@ -509,7 +529,7 @@ describe("service-worker restart", () => {
     await controller.onPopupMessage({ type: "connect-active-tab" });
     await controller.onBridgeMessage({
       type: "openTab",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: rid,
       url: "https://t50/",
     });
@@ -552,7 +572,7 @@ describe("service-worker restart", () => {
     ]);
     await restarted.controller.onBridgeMessage({
       type: "command",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: rid,
       tabId: 8,
       method: "Runtime.evaluate",
@@ -667,7 +687,7 @@ describe("explicit connection model", () => {
     await controller.onPopupMessage({ type: "connect-active-tab" });
     await controller.onBridgeMessage({
       type: "openTab",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: rid,
       url: "https://t50/",
     });

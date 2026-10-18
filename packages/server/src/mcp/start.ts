@@ -1,6 +1,6 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { DaemonClient } from "../client/daemon-client";
-import { type Paths, pointerEnabled } from "../config";
+import { type Paths, pointerEnabled, resolveBrowserConfig } from "../config";
 import { createToolContext } from "./create-context";
 import { createMcpServer } from "./server";
 
@@ -14,6 +14,8 @@ export async function startMcpServer(options: {
     paths: options.paths,
     clientVersion: options.clientVersion,
     entryScript: options.entryScript,
+    browserConfig: resolveBrowserConfig(options.env),
+    env: options.env,
   });
   const server = createMcpServer(
     createToolContext(client, { pointer: pointerEnabled(options.env) }),

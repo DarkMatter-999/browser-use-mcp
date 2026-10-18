@@ -20,11 +20,21 @@ export async function runStatus(ctx: CommandContext, args: string[]): Promise<nu
     }
     const lines = [
       `Daemon: running (v${status.daemonVersion}, pid ${status.pid})`,
+      `Mode: ${status.mode} (requested: ${status.requestedMode})`,
+      `Profile: ${status.profile}`,
+      ...(status.browserName === undefined ? [] : [`Browser: ${status.browserName}`]),
+      ...(status.fallbackReason === undefined ? [] : [`Fallback: ${status.fallbackReason}`]),
       `Extension: ${
-        status.extensionConnected
-          ? "connected"
-          : 'not connected (it connects while a tab is connected, or always with "Let the agent open tabs" on)'
+        status.mode === "headless"
+          ? "not used (headless mode)"
+          : status.extensionConnected
+            ? "connected"
+            : 'not connected (it connects while a tab is connected, or always with "Let the agent open tabs" on)'
       }`,
+      `Capabilities: ${Object.entries(status.capabilities)
+        .filter(([, enabled]) => enabled)
+        .map(([name]) => name)
+        .join(", ")}`,
       `Tabs: ${status.tabs.length}`,
       ...status.tabs.map((tab) => `  ${tab.tabId}  ${tab.title}  ${tab.url}`),
     ];

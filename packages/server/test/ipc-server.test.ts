@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import net from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
+import { PROTOCOL_VERSION } from "@browser-use/protocol";
 import { startInProcessDaemon } from "./helpers/in-process-daemon";
 
 type Daemon = Awaited<ReturnType<typeof startInProcessDaemon>>;
@@ -47,10 +48,74 @@ describe("IpcServer", () => {
   it("requires hello first and acks with the daemon version", async () => {
     daemon = await startInProcessDaemon("4.5.6");
     const c = open(daemon.paths.ipcEndpoint);
-    c.send({ type: "hello", protocolVersion: 1, clientVersion: "0.0.1" });
+    c.send({ type: "hello", protocolVersion: PROTOCOL_VERSION, clientVersion: "0.0.1" });
     expect(await c.next((m) => m.type === "helloAck")).toMatchObject({
       daemonVersion: "4.5.6",
-      protocolVersion: 1,
+      protocolVersion: PROTOCOL_VERSION,
+      effectiveBrowserConfig: { mode: "extension", profile: "default" },
+    });
+    c.socket.destroy();
+  });
+
+  it("rejects a client whose requested browser settings differ from the shared daemon", async () => {
+    daemon = await startInProcessDaemon();
+    const c = open(daemon.paths.ipcEndpoint);
+    c.send({
+      type: "hello",
+      protocolVersion: PROTOCOL_VERSION,
+      clientVersion: "0.0.1",
+      browserConfig: { mode: "headless", profile: "guest" },
+    });
+
+    expect(await c.next((m) => m.type === "helloAck")).toMatchObject({
+      error: {
+        code: "CONFIG_MISMATCH",
+        hint: expect.stringMatching(/stop.*restart.*matching MCP config/i) as string,
+      },
+    });
+    c.socket.destroy();
+  });
+
+  it("reports backend mode and capabilities in status", async () => {
+    daemon = await startInProcessDaemon();
+    const c = open(daemon.paths.ipcEndpoint);
+    c.send({ type: "hello", protocolVersion: PROTOCOL_VERSION, clientVersion: "0.0.1" });
+    await c.next((m) => m.type === "helloAck");
+    c.send({ type: "status", id: 41 });
+
+    expect(await c.next((m) => m.type === "result" && m.id === 41)).toMatchObject({
+      value: {
+        mode: "extension",
+        requestedMode: "extension",
+        profile: "default",
+        capabilities: { cdp: true, downloads: true, dialogs: true },
+      },
+    });
+    c.socket.destroy();
+  });
+
+  it("reports headless mode as disconnected from the extension", async () => {
+    daemon = await startInProcessDaemon("1.0.0", {
+      backendKind: "headless",
+      browserConfig: { mode: "headless", profile: "guest" },
+    });
+    const c = open(daemon.paths.ipcEndpoint);
+    c.send({
+      type: "hello",
+      protocolVersion: PROTOCOL_VERSION,
+      clientVersion: "1",
+      browserConfig: { mode: "headless", profile: "guest" },
+    });
+    await c.next((m) => m.type === "helloAck");
+    c.send({ type: "status", id: 42 });
+
+    expect(await c.next((m) => m.type === "result" && m.id === 42)).toMatchObject({
+      value: {
+        mode: "headless",
+        requestedMode: "headless",
+        profile: "guest",
+        extensionConnected: false,
+      },
     });
     c.socket.destroy();
   });
@@ -84,7 +149,7 @@ describe("IpcServer", () => {
         };
       });
     const worker = open(daemon.paths.ipcEndpoint);
-    worker.send({ type: "hello", protocolVersion: 1, clientVersion: "1" });
+    worker.send({ type: "hello", protocolVersion: PROTOCOL_VERSION, clientVersion: "1" });
     await worker.next((m) => m.type === "helloAck");
     worker.send({
       type: "sendCommand",
@@ -96,7 +161,7 @@ describe("IpcServer", () => {
     });
     await new Promise((r) => setTimeout(r, 30));
     const restarter = open(daemon.paths.ipcEndpoint);
-    restarter.send({ type: "hello", protocolVersion: 1, clientVersion: "2" });
+    restarter.send({ type: "hello", protocolVersion: PROTOCOL_VERSION, clientVersion: "2" });
     await restarter.next((m) => m.type === "helloAck");
     restarter.send({ type: "shutdown", id: 1 });
     await new Promise((r) => setTimeout(r, 100));
@@ -123,7 +188,7 @@ describe("IpcServer", () => {
     daemon = await startInProcessDaemon("1.0.0", { drainTimeoutMs: 150 });
     daemon.backend.sendCommand = () => new Promise(() => undefined);
     const c = open(daemon.paths.ipcEndpoint);
-    c.send({ type: "hello", protocolVersion: 1, clientVersion: "1" });
+    c.send({ type: "hello", protocolVersion: PROTOCOL_VERSION, clientVersion: "1" });
     await c.next((m) => m.type === "helloAck");
     c.send({
       type: "sendCommand",
@@ -151,7 +216,7 @@ describe("IpcServer", () => {
   it("pushes tabsChanged after hello and whenever the backend reports a change", async () => {
     daemon = await startInProcessDaemon();
     const c = open(daemon.paths.ipcEndpoint);
-    c.send({ type: "hello", protocolVersion: 1, clientVersion: "1" });
+    c.send({ type: "hello", protocolVersion: PROTOCOL_VERSION, clientVersion: "1" });
     await c.next((m) => m.type === "tabsChanged");
     daemon.backend.tabs = [{ tabId: 3, url: "https://a/", title: "A" }];
     daemon.backend.emitTabs();
@@ -163,7 +228,7 @@ describe("IpcServer", () => {
     daemon = await startInProcessDaemon();
     daemon.backend.tabs = [{ tabId: 3, url: "https://a/", title: "A" }];
     const c = open(daemon.paths.ipcEndpoint);
-    c.send({ type: "hello", protocolVersion: 1, clientVersion: "1" });
+    c.send({ type: "hello", protocolVersion: PROTOCOL_VERSION, clientVersion: "1" });
     c.send({ type: "status", id: 1 });
     c.send({ type: "fileAccess", id: 4 });
     c.send({ type: "openTab", id: 2, url: "https://example.com/" });
@@ -194,7 +259,7 @@ describe("IpcServer", () => {
       throw new BrowserUseError("DIALOG_OPEN", "open", { hint: "handle it" });
     };
     const c = open(daemon.paths.ipcEndpoint);
-    c.send({ type: "hello", protocolVersion: 1, clientVersion: "1" });
+    c.send({ type: "hello", protocolVersion: PROTOCOL_VERSION, clientVersion: "1" });
     c.send({
       type: "sendCommand",
       id: 9,
@@ -213,7 +278,7 @@ describe("IpcServer", () => {
     daemon = await startInProcessDaemon();
     const c = open(daemon.paths.ipcEndpoint);
     const subscriptionId = "11111111-1111-4111-8111-111111111111";
-    c.send({ type: "hello", protocolVersion: 1, clientVersion: "1" });
+    c.send({ type: "hello", protocolVersion: PROTOCOL_VERSION, clientVersion: "1" });
     c.send({ type: "subscribe", subscriptionId, tabId: 3 });
     await c.next((m) => m.type === "helloAck");
     await new Promise((r) => setTimeout(r, 30));
@@ -234,7 +299,7 @@ describe("IpcServer", () => {
   it("creates pairing codes, rotates the token, and shuts down on request", async () => {
     daemon = await startInProcessDaemon();
     const c = open(daemon.paths.ipcEndpoint);
-    c.send({ type: "hello", protocolVersion: 1, clientVersion: "1" });
+    c.send({ type: "hello", protocolVersion: PROTOCOL_VERSION, clientVersion: "1" });
     c.send({ type: "createPairingCode", id: 1 });
     c.send({ type: "resetToken", id: 2 });
     c.send({ type: "shutdown", id: 3 });
@@ -252,7 +317,7 @@ describe("IpcServer", () => {
   it("drops a client that sends an oversized line", async () => {
     daemon = await startInProcessDaemon();
     const c = open(daemon.paths.ipcEndpoint);
-    c.send({ type: "hello", protocolVersion: 1, clientVersion: "1" });
+    c.send({ type: "hello", protocolVersion: PROTOCOL_VERSION, clientVersion: "1" });
     await c.next((m) => m.type === "helloAck");
     c.socket.write("x".repeat(9 * 1024 * 1024));
     await new Promise((resolve) => c.socket.once("close", resolve));

@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { BrowserUseError } from "../src/errors";
+import { BrowserUseError, errorPayloadSchema } from "../src/errors";
 import {
+  browserConfigSchema,
+  backendCapabilitiesSchema,
   daemonStatusSchema,
   type IpcClientMessage,
   MAX_IPC_MESSAGE_BYTES,
@@ -9,12 +11,15 @@ import {
   parseIpcClientMessage,
   parseIpcServerMessage,
   serializeIpcMessage,
+  type BrowserConfig,
 } from "../src/ipc";
+import { PROTOCOL_VERSION } from "../src/version";
 
 const subscriptionId = randomUUID();
+const browserConfig: BrowserConfig = { mode: "extension", profile: "default" };
 
 const clientSamples: IpcClientMessage[] = [
-  { type: "hello", protocolVersion: 1, clientVersion: "0.1.0" },
+  { type: "hello", protocolVersion: PROTOCOL_VERSION, clientVersion: "0.1.0", browserConfig },
   { type: "status", id: 1 },
   { type: "listTabs", id: 2 },
   { type: "openTab", id: 3, url: "https://example.com/" },
@@ -38,7 +43,12 @@ const clientSamples: IpcClientMessage[] = [
 ];
 
 const serverSamples: IpcServerMessage[] = [
-  { type: "helloAck", protocolVersion: 1, daemonVersion: "0.1.0" },
+  {
+    type: "helloAck",
+    protocolVersion: PROTOCOL_VERSION,
+    daemonVersion: "0.1.0",
+    effectiveBrowserConfig: { mode: "extension", profile: "default" },
+  },
   { type: "result", id: 1, value: { paired: true } },
   { type: "failure", id: 2, error: { code: "TIMEOUT", message: "Timed out" } },
   { type: "event", subscriptionId, method: "Page.loadEventFired", params: {} },
@@ -77,7 +87,7 @@ describe("IPC messages", () => {
   });
 
   it("reports a protocol version mismatch on hello", () => {
-    const bad = { ...clientSamples[0], protocolVersion: 2 };
+    const bad = { ...clientSamples[0], protocolVersion: PROTOCOL_VERSION - 1 };
     try {
       parseIpcClientMessage(JSON.stringify(bad));
       expect.unreachable();
@@ -93,7 +103,12 @@ describe("IPC messages", () => {
   });
 
   it("reports a version mismatch on a helloAck from the daemon", () => {
-    const text = JSON.stringify({ type: "helloAck", protocolVersion: 2, daemonVersion: "0.1.0" });
+    const text = JSON.stringify({
+      type: "helloAck",
+      protocolVersion: PROTOCOL_VERSION - 1,
+      daemonVersion: "0.1.0",
+      effectiveBrowserConfig: { mode: "extension", profile: "default" },
+    });
     try {
       parseIpcServerMessage(text);
       expect.unreachable();
@@ -138,6 +153,9 @@ describe("daemonStatusSchema", () => {
     extensionConnected: false,
     tabs: [{ tabId: 7, url: "https://example.com/", title: "Example" }],
     mode: "extension",
+    requestedMode: "extension",
+    profile: "default",
+    capabilities: { cdp: true, downloads: true, dialogs: true, fileAccess: true, pointer: true },
   };
 
   it("parses a full status", () => {
@@ -146,5 +164,58 @@ describe("daemonStatusSchema", () => {
 
   it("rejects mode launch", () => {
     expect(daemonStatusSchema.safeParse({ ...status, mode: "launch" }).success).toBe(false);
+  });
+
+  it("parses headless status with configured mode, profile, fallback reason, and capabilities", () => {
+    const headlessStatus = {
+      ...status,
+      mode: "headless",
+      requestedMode: "auto",
+      profile: "guest",
+      browserName: "Chromium",
+      fallbackReason: "Extension not connected at startup",
+      capabilities: {
+        cdp: true,
+        downloads: true,
+        dialogs: true,
+        fileAccess: true,
+        pointer: true,
+      },
+    };
+    expect(daemonStatusSchema.parse(headlessStatus)).toEqual(headlessStatus);
+  });
+});
+
+describe("browser IPC configuration", () => {
+  it("validates normalized launch configuration", () => {
+    expect(
+      browserConfigSchema.parse({
+        mode: "auto",
+        profile: "guest",
+        executablePath: "/usr/bin/chromium",
+      }),
+    ).toEqual({ mode: "auto", profile: "guest", executablePath: "/usr/bin/chromium" });
+    expect(browserConfigSchema.safeParse({ mode: "launch", profile: "default" }).success).toBe(
+      false,
+    );
+  });
+
+  it("validates backend capabilities and configuration mismatch error payloads", () => {
+    expect(
+      backendCapabilitiesSchema.parse({
+        cdp: true,
+        downloads: true,
+        dialogs: true,
+        fileAccess: true,
+        pointer: false,
+      }),
+    ).toEqual({ cdp: true, downloads: true, dialogs: true, fileAccess: true, pointer: false });
+    expect(
+      errorPayloadSchema.parse({
+        code: "CONFIG_MISMATCH",
+        message: "The running daemon uses different browser settings",
+        hint: "Stop the daemon, then restart with matching MCP config.",
+      }).code,
+    ).toBe("CONFIG_MISMATCH");
   });
 });

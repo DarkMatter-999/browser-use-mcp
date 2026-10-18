@@ -1,5 +1,5 @@
 import type { DaemonClient } from "../client/daemon-client";
-import type { Paths } from "../config";
+import { type Paths, resolveBrowserConfig } from "../config";
 
 export interface Io {
   out(text: string): void;
@@ -22,6 +22,8 @@ export async function connectExisting(ctx: CommandContext): Promise<DaemonClient
       clientVersion: ctx.clientVersion,
       entryScript: ctx.entryScript,
       autostart: false,
+      browserConfig: resolveBrowserConfig(ctx.env),
+      env: ctx.env,
     });
   } catch {
     return undefined;

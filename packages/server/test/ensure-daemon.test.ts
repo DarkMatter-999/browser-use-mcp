@@ -64,6 +64,33 @@ describe("ensureDaemon", () => {
     });
   });
 
+  it("passes configured browser settings into a newly spawned daemon", async () => {
+    const home = await mkdtemp(join(tmpdir(), "bu-"));
+    cleanups.push(() => rm(home, { recursive: true, force: true }));
+    const paths = resolvePaths({ BROWSER_USE_HOME: home });
+    const env = {
+      ...process.env,
+      BROWSER_USE_MODE: "headless",
+      BROWSER_USE_PROFILE: "guest",
+      BROWSER_USE_CHROME_PATH: "/opt/chromium/chrome",
+    };
+    let server: IpcServer | undefined;
+    cleanups.push(async () => server?.close());
+    const spawnDaemon = vi.fn((_entryScript: string, childEnv: NodeJS.ProcessEnv) => {
+      expect(childEnv).toMatchObject({
+        BROWSER_USE_MODE: "headless",
+        BROWSER_USE_PROFILE: "guest",
+        BROWSER_USE_CHROME_PATH: "/opt/chromium/chrome",
+      });
+      server = newServer();
+      void server.listen(paths.ipcEndpoint);
+    });
+
+    await ensureDaemon(paths, "entry.js", { spawnDaemon, env, startupTimeoutMs: 1000 });
+
+    expect(spawnDaemon).toHaveBeenCalledOnce();
+  });
+
   it("recovers from a stale start lock", async () => {
     const home = await mkdtemp(join(tmpdir(), "bu-"));
     cleanups.push(() => rm(home, { recursive: true, force: true }));

@@ -1,9 +1,10 @@
 # Browser Use MCP
 
-Let an AI agent use **your own browser**: your tabs, your logins, your extensions. Browser Use is an
-[MCP](https://modelcontextprotocol.io) server plus a small Chrome extension. The agent can read
+Let an AI agent control a browser through an
+[MCP](https://modelcontextprotocol.io) server. Use the extension to connect tabs in your existing
+browser, or launch a separate headless browser with its own Browser Use profile. The agent can read
 pages, click, type, upload and download files, handle dialogs, and inspect console and network
-activity, but only in tabs you connect, and only through an authenticated local connection.
+activity.
 
 > **Status: pre-release.** It is built and tested, but not published yet. Today you run it from a
 > local build (see [Install](#install)). Tested on Linux with Chromium and Brave; macOS and Windows
@@ -12,14 +13,16 @@ activity, but only in tabs you connect, and only through an authenticated local 
 ## How it works
 
 ```
- MCP client ──stdio──▶ browseruse-mcp ──local socket──▶ background daemon ◀──WebSocket (127.0.0.1)── extension ──CDP──▶ your tabs
- (Claude, Cursor, …)   (one per client)                  (shared, auto-started)   (token + origin checked)
+ MCP client ──stdio──▶ browseruse-mcp ──local socket──▶ background daemon ──┬──WebSocket──▶ extension ──CDP──▶ your tabs
+ (Claude, Cursor, …)   (one per client)                  (shared, auto-started) └──private pipe──▶ launched Chromium
 ```
 
 - Each MCP client starts its own thin `browseruse-mcp` process. They all share one background daemon,
   which starts on demand and exits when idle.
 - The extension drives tabs with the Chrome debugger protocol, restricted to an explicit allowlist of
   methods.
+- Launch mode controls a separate local browser over a private CDP pipe; it never attaches to your
+  everyday browser profile.
 - You stay in control: the extension connects to the daemon only while you have a tab connected (or
   you turn on the setting that lets the agent open tabs).
 
@@ -166,15 +169,58 @@ From a source checkout, run these as `node packages/server/dist/cli.js <command>
 
 ## Configuration
 
-| Variable                   | Default          | Purpose                                                     |
-| -------------------------- | ---------------- | ----------------------------------------------------------- |
-| `BROWSER_USE_HOME`         | `~/.browser-use` | State directory: token, log, lock, IPC socket               |
-| `BROWSER_USE_PORT`         | `38241`          | Loopback port for the extension connection                  |
-| `BROWSER_USE_POINTER`      | on               | Set to `0` to disable the pointer overlay                   |
-| `BROWSER_USE_EXTENSION_ID` | pinned ID        | Override the allowed extension ID (development builds only) |
+| Variable                   | Default          | Purpose                                                        |
+| -------------------------- | ---------------- | -------------------------------------------------------------- |
+| `BROWSER_USE_HOME`         | `~/.browser-use` | State directory: token, log, lock, IPC socket                  |
+| `BROWSER_USE_PORT`         | `38241`          | Loopback port for the extension connection                     |
+| `BROWSER_USE_MODE`         | `extension`      | `extension`, `headless`, or `auto`                             |
+| `BROWSER_USE_PROFILE`      | `default`        | Dedicated persistent profile (`default`) or disposable `guest` |
+| `BROWSER_USE_CHROME_PATH`  | auto-discovered  | Optional path to a local Chrome/Chromium/Edge/Brave executable |
+| `BROWSER_USE_POINTER`      | on               | Set to `0` to disable the pointer overlay                      |
+| `BROWSER_USE_EXTENSION_ID` | pinned ID        | Override the allowed extension ID (development builds only)    |
 
 If you change the port, set the same port in the extension (`chrome.storage.local` key `port`).
 The daemon log is `~/.browser-use/daemon.log`.
+
+### Browser mode and profile
+
+Set these variables in the MCP server process configuration. For example, in an MCP server config
+that supports an `env` object:
+
+```json
+{
+  "mcpServers": {
+    "browser-use": {
+      "command": "node",
+      "args": ["/absolute/path/to/browseruse/packages/server/dist/cli.js"],
+      "env": {
+        "BROWSER_USE_MODE": "auto",
+        "BROWSER_USE_PROFILE": "default"
+      }
+    }
+  }
+}
+```
+
+- `extension` (default) controls tabs connected through the extension and never launches a browser.
+- `headless` launches a local browser directly; no extension or pairing is required.
+- `auto` prefers the extension at daemon startup, then launches headless if the extension is not
+  ready within five seconds. It does not switch browsers if the extension disconnects mid-session;
+  calls report the disconnect instead.
+- `BROWSER_USE_PROFILE=default` automatically creates and retains a dedicated profile under
+  `~/.browser-use/profile`, separate from your everyday browser profile. Site logins and state in
+  this dedicated profile persist between daemon runs.
+- `BROWSER_USE_PROFILE=guest` requests a disposable guest session. Guest mode support varies by
+  browser/platform; unsupported combinations produce an error instead of silently using the
+  persistent profile.
+- Browser Use discovers a local Chrome, Chromium, Edge, or Brave installation. Set
+  `BROWSER_USE_CHROME_PATH` to select a specific executable. Browser binaries are not downloaded.
+- MCP clients share one daemon. Keep mode/profile settings consistent across clients; to change
+  them, run `browseruse-mcp stop` and restart the MCP client with the new settings. A conflicting
+  client receives a configuration error rather than silently using the other client's browser.
+
+Headless and guest profiles can behave differently from an established everyday profile on websites.
+Headless mode is not a CAPTCHA solver or bypass.
 
 ## Troubleshooting
 

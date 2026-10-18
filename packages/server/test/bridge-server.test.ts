@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
+import { PROTOCOL_VERSION } from "@browser-use/protocol";
 import { BridgeServer } from "../src/daemon/bridge-server";
 import { FailureLimiter, PairingCodes } from "../src/daemon/token-store";
 
@@ -83,7 +84,7 @@ function opened(socket: WebSocket) {
 
 const helloMessage = () => ({
   type: "hello",
-  version: 1,
+  version: PROTOCOL_VERSION,
   peerId: randomUUID(),
   token: TOKEN,
   extensionVersion: "0",
@@ -155,8 +156,8 @@ describe("BridgeServer", () => {
     const socket = connect(port);
     await opened(socket);
     const paired = nextMessage(socket);
-    socket.send(JSON.stringify({ type: "pair", version: 1, code: codes.create() }));
-    expect(await paired).toEqual({ type: "paired", version: 1, token: TOKEN });
+    socket.send(JSON.stringify({ type: "pair", version: PROTOCOL_VERSION, code: codes.create() }));
+    expect(await paired).toEqual({ type: "paired", version: PROTOCOL_VERSION, token: TOKEN });
     const ack = nextMessage(socket);
     socket.send(JSON.stringify(helloMessage()));
     expect(await ack).toMatchObject({ type: "helloAck" });
@@ -196,8 +197,8 @@ describe("BridgeServer", () => {
     expect(firstClosed).toBe(false);
     expect(server.peer).toBe(firstPeer);
     const pong = nextMessage(first);
-    first.send(JSON.stringify({ type: "ping", version: 1 }));
-    expect(await pong).toEqual({ type: "pong", version: 1 });
+    first.send(JSON.stringify({ type: "ping", version: PROTOCOL_VERSION }));
+    expect(await pong).toEqual({ type: "pong", version: PROTOCOL_VERSION });
     expect(lines.join("\n")).toMatch(/handshake denied \(BRIDGE_IN_USE\)/);
     first.close();
   });
@@ -218,7 +219,7 @@ describe("BridgeServer", () => {
     const pairing = connect(port);
     await opened(pairing);
     const paired = nextMessage(pairing);
-    pairing.send(JSON.stringify({ type: "pair", version: 1, code: codes.create() }));
+    pairing.send(JSON.stringify({ type: "pair", version: PROTOCOL_VERSION, code: codes.create() }));
     expect(await paired).toMatchObject({ type: "paired" });
     pairing.close();
     first.close();

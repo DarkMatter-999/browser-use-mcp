@@ -1,7 +1,13 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ConnectedTab, DownloadInfo, JsonObject, JsonValue } from "@browser-use/protocol";
+import type {
+  BrowserConfig,
+  ConnectedTab,
+  DownloadInfo,
+  JsonObject,
+  JsonValue,
+} from "@browser-use/protocol";
 import { type Paths, resolvePaths } from "../../src/config";
 import type { BrowserBackend, CdpEventListener } from "../../src/daemon/backend";
 import { IpcServer } from "../../src/daemon/ipc-server";
@@ -9,7 +15,15 @@ import type { Logger } from "../../src/daemon/log";
 import { PairingCodes } from "../../src/daemon/token-store";
 
 export class StubBackend implements BrowserBackend {
-  readonly kind = "extension" as const;
+  readonly kind: "extension" | "headless";
+  readonly browserName?: string;
+  readonly capabilities = {
+    cdp: true,
+    downloads: true,
+    dialogs: true,
+    fileAccess: true,
+    pointer: true,
+  } as const;
   tabs: ConnectedTab[] = [];
   downloads: DownloadInfo[] = [];
   commands: { tabId: number; method: string; params: JsonObject }[] = [];
@@ -18,8 +32,15 @@ export class StubBackend implements BrowserBackend {
   removedListeners = new Set<(tabId: number) => void>();
   downloadListeners = new Set<(downloads: DownloadInfo[]) => void>();
   connected = true;
+  constructor(kind: "extension" | "headless" = "extension", browserName?: string) {
+    this.kind = kind;
+    this.browserName = browserName;
+  }
   isConnected() {
     return this.connected;
+  }
+  close(): Promise<void> {
+    return Promise.resolve();
   }
   listTabs() {
     return this.tabs;
@@ -68,17 +89,28 @@ export class StubBackend implements BrowserBackend {
 
 export async function startInProcessDaemon(
   version = "1.0.0",
-  options: { paths?: Paths; closeOnShutdown?: boolean; log?: Logger; drainTimeoutMs?: number } = {},
+  options: {
+    paths?: Paths;
+    closeOnShutdown?: boolean;
+    log?: Logger;
+    drainTimeoutMs?: number;
+    backendKind?: "extension" | "headless";
+    browserName?: string;
+    fallbackReason?: string;
+    browserConfig?: BrowserConfig;
+  } = {},
 ) {
   const ownsHome = options.paths === undefined;
   const home = options.paths?.home ?? (await mkdtemp(join(tmpdir(), "bu-")));
   const paths: Paths = options.paths ?? resolvePaths({ BROWSER_USE_HOME: home });
-  const backend = new StubBackend();
+  const backend = new StubBackend(options.backendKind, options.browserName);
   const pairing = new PairingCodes();
   let rotations = 0;
   let shutdowns = 0;
   const server: IpcServer = new IpcServer({
     backend,
+    ...(options.browserConfig === undefined ? {} : { browserConfig: options.browserConfig }),
+    ...(options.fallbackReason === undefined ? {} : { fallbackReason: options.fallbackReason }),
     pairing,
     daemonVersion: version,
     port: 38241,

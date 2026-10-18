@@ -56,6 +56,27 @@ describe("status", () => {
     expect(c.text()).toContain("5");
   });
 
+  it("prints actual mode, configured profile, browser and startup fallback", async () => {
+    daemon = await startInProcessDaemon("1.0.0", {
+      backendKind: "headless",
+      browserConfig: { mode: "auto", profile: "guest" },
+      browserName: "Chromium",
+      fallbackReason: "Extension unavailable at startup; selected headless mode.",
+    });
+    const c = capture();
+    expect(
+      await run(["status"], c.io, {
+        ...deps(daemon),
+        env: { BROWSER_USE_MODE: "auto", BROWSER_USE_PROFILE: "guest" },
+      }),
+    ).toBe(0);
+    expect(c.text()).toContain("Mode: headless (requested: auto)");
+    expect(c.text()).toContain("Profile: guest");
+    expect(c.text()).toContain("Browser: Chromium");
+    expect(c.text()).toContain("Fallback: Extension unavailable at startup");
+    expect(c.text()).toContain("Extension: not used (headless mode)");
+  });
+
   it("explains that a disconnected extension is expected while no tabs are connected", async () => {
     daemon = await startInProcessDaemon();
     daemon.backend.connected = false;
@@ -116,6 +137,31 @@ describe("doctor", () => {
     );
     expect(c.text()).not.toMatch(/fail\s+extension/);
     expect(code).toBe(0);
+  });
+
+  it("checks browser discovery for headless mode without warning about the unused extension", async () => {
+    daemon = await startInProcessDaemon("1.0.0", {
+      backendKind: "headless",
+      browserConfig: {
+        mode: "headless",
+        profile: "default",
+        executablePath: "/missing/browser-use-test-browser",
+      },
+    });
+    const c = capture();
+    const code = await run(["doctor"], c.io, {
+      ...deps(daemon),
+      env: {
+        BROWSER_USE_MODE: "headless",
+        BROWSER_USE_CHROME_PATH: "/missing/browser-use-test-browser",
+      },
+    });
+
+    expect(c.text()).toMatch(/fail\s+browser/);
+    expect(c.text()).toContain("BROWSER_USE_CHROME_PATH");
+    expect(c.text()).toContain("not used (headless mode)");
+    expect(c.text()).not.toMatch(/warn\s+extension\s+not connected/);
+    expect(code).toBe(1);
   });
 
   it("fails (exit 1) with a fix when the state dir is unusable", async () => {

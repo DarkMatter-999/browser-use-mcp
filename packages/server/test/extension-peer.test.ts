@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { BrowserUseError } from "@browser-use/protocol";
+import { BrowserUseError, PROTOCOL_VERSION } from "@browser-use/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ExtensionPeer, type PeerEvents } from "../src/daemon/extension-peer";
 import { FailureLimiter, PairingCodes } from "../src/daemon/token-store";
@@ -8,7 +8,7 @@ import { FakeSocket } from "./helpers/fake-socket";
 const TOKEN = "c".repeat(64);
 const hello = () => ({
   type: "hello",
-  version: 1,
+  version: PROTOCOL_VERSION,
   peerId: randomUUID(),
   token: TOKEN,
   extensionVersion: "0.0.0",
@@ -79,8 +79,8 @@ describe("handshake", () => {
   it("exchanges a valid pairing code for the token, then accepts hello", () => {
     const { socket, peer, codes } = setup();
     const code = codes.create();
-    socket.receive({ type: "pair", version: 1, code });
-    expect(socket.last()).toEqual({ type: "paired", version: 1, token: TOKEN });
+    socket.receive({ type: "pair", version: PROTOCOL_VERSION, code });
+    expect(socket.last()).toEqual({ type: "paired", version: PROTOCOL_VERSION, token: TOKEN });
     expect(peer.isReady).toBe(false);
     socket.receive(hello());
     expect(peer.isReady).toBe(true);
@@ -88,7 +88,7 @@ describe("handshake", () => {
 
   it("denies an unknown pairing code without NOT_PAIRED (which would erase a stored token)", () => {
     const { socket } = setup();
-    socket.receive({ type: "pair", version: 1, code: "ABCDEFGH" });
+    socket.receive({ type: "pair", version: PROTOCOL_VERSION, code: "ABCDEFGH" });
     expect(socket.last()).toMatchObject({ error: { code: "INVALID_ARGUMENT" } });
     expect(socket.closeCode).toBe(1008);
   });
@@ -105,7 +105,7 @@ describe("handshake", () => {
     const { socket, codes, limiter } = setup();
     const code = codes.create();
     for (let index = 0; index < 3; index += 1) limiter.record();
-    socket.receive({ type: "pair", version: 1, code });
+    socket.receive({ type: "pair", version: PROTOCOL_VERSION, code });
     expect(socket.last()).toMatchObject({ type: "error", error: { code: "LIMIT_EXCEEDED" } });
     expect(socket.closeCode).toBe(1008);
   });
@@ -128,11 +128,11 @@ describe("handshake", () => {
     const bad = setup(lines);
     bad.socket.receive({ ...hello(), token: "d".repeat(64) });
     const pair = setup(lines);
-    pair.socket.receive({ type: "pair", version: 1, code: "ZZZZ2222" });
+    pair.socket.receive({ type: "pair", version: PROTOCOL_VERSION, code: "ZZZZ2222" });
     const malformed = setup(lines);
-    malformed.socket.receive({ type: "hello", version: 1, token: "e".repeat(64) });
+    malformed.socket.receive({ type: "hello", version: PROTOCOL_VERSION, token: "e".repeat(64) });
     const early = setup(lines);
-    early.socket.receive({ type: "ping", version: 1 });
+    early.socket.receive({ type: "ping", version: PROTOCOL_VERSION });
     expect(lines).toEqual([
       expect.stringMatching(/^ERROR peer :1234: handshake denied \(NOT_PAIRED\)/),
       expect.stringMatching(/^ERROR peer :1234: handshake denied \(INVALID_ARGUMENT\)/),
@@ -147,13 +147,13 @@ describe("handshake", () => {
 
   it("closes with 1002 when anything other than pair/hello arrives first", () => {
     const { socket } = setup();
-    socket.receive({ type: "ping", version: 1 });
+    socket.receive({ type: "ping", version: PROTOCOL_VERSION });
     expect(socket.closeCode).toBe(1002);
   });
 
   it("closes on an invalid message and reports VERSION_MISMATCH distinctly", () => {
     const { socket } = setup();
-    socket.receive({ ...hello(), version: 2 });
+    socket.receive({ ...hello(), version: PROTOCOL_VERSION - 1 });
     expect(socket.last()).toMatchObject({ error: { code: "VERSION_MISMATCH" } });
     expect(socket.closeCode).toBe(1002);
   });
@@ -175,7 +175,7 @@ describe("handshake", () => {
     const { socket, peer } = await ready();
     vi.advanceTimersByTime(25_000);
     expect(peer.silentForMs).toBeGreaterThanOrEqual(25_000);
-    socket.receive({ type: "ping", version: 1 });
+    socket.receive({ type: "ping", version: PROTOCOL_VERSION });
     expect(peer.silentForMs).toBe(0);
   });
 
@@ -190,8 +190,8 @@ describe("handshake", () => {
 describe("after handshake", () => {
   it("answers ping with pong", async () => {
     const { socket } = await ready();
-    socket.receive({ type: "ping", version: 1 });
-    expect(socket.last()).toEqual({ type: "pong", version: 1 });
+    socket.receive({ type: "ping", version: PROTOCOL_VERSION });
+    expect(socket.last()).toEqual({ type: "pong", version: PROTOCOL_VERSION });
   });
 
   it("closes an idle peer after 90 s without messages", async () => {
@@ -205,7 +205,7 @@ describe("after handshake", () => {
     const dialog = { type: "alert", message: "still open", url: "https://a/" };
     socket.receive({
       type: "registerTab",
-      version: 1,
+      version: PROTOCOL_VERSION,
       tabId: 9,
       url: "https://a/",
       title: "A",
@@ -213,15 +213,39 @@ describe("after handshake", () => {
     });
     expect(events.onTabRegistered).toHaveBeenCalledWith(9, dialog);
     expect(peer.listTabs()[0]).not.toHaveProperty("pendingDialog");
-    socket.receive({ type: "registerTab", version: 1, tabId: 9, url: "https://a/", title: "A" });
+    socket.receive({
+      type: "registerTab",
+      version: PROTOCOL_VERSION,
+      tabId: 9,
+      url: "https://a/",
+      title: "A",
+    });
     expect(events.onTabRegistered).toHaveBeenLastCalledWith(9, undefined);
   });
 
   it("tracks tabs, updates titles on re-register, and keeps them sorted", async () => {
     const { socket, peer, events } = await ready();
-    socket.receive({ type: "registerTab", version: 1, tabId: 9, url: "https://a/", title: "A" });
-    socket.receive({ type: "registerTab", version: 1, tabId: 3, url: "https://b/", title: "B" });
-    socket.receive({ type: "registerTab", version: 1, tabId: 9, url: "https://a/", title: "A2" });
+    socket.receive({
+      type: "registerTab",
+      version: PROTOCOL_VERSION,
+      tabId: 9,
+      url: "https://a/",
+      title: "A",
+    });
+    socket.receive({
+      type: "registerTab",
+      version: PROTOCOL_VERSION,
+      tabId: 3,
+      url: "https://b/",
+      title: "B",
+    });
+    socket.receive({
+      type: "registerTab",
+      version: PROTOCOL_VERSION,
+      tabId: 9,
+      url: "https://a/",
+      title: "A2",
+    });
     expect(peer.listTabs().map((tab) => [tab.tabId, tab.title])).toEqual([
       [3, "B"],
       [9, "A2"],
@@ -231,8 +255,14 @@ describe("after handshake", () => {
 
   it("unregisters a tab and notifies", async () => {
     const { socket, peer, events } = await ready();
-    socket.receive({ type: "registerTab", version: 1, tabId: 4, url: "https://a/", title: "A" });
-    socket.receive({ type: "unregisterTab", version: 1, tabId: 4 });
+    socket.receive({
+      type: "registerTab",
+      version: PROTOCOL_VERSION,
+      tabId: 4,
+      url: "https://a/",
+      title: "A",
+    });
+    socket.receive({ type: "unregisterTab", version: PROTOCOL_VERSION, tabId: 4 });
     expect(peer.hasTab(4)).toBe(false);
     expect(events.onTabRemoved).toHaveBeenCalledWith(4);
   });
@@ -241,23 +271,29 @@ describe("after handshake", () => {
     const { socket, peer, events } = await ready();
     socket.receive({
       type: "event",
-      version: 1,
+      version: PROTOCOL_VERSION,
       tabId: 5,
       method: "Page.loadEventFired",
       params: {},
     });
     expect(events.onTabEvent).not.toHaveBeenCalled();
-    socket.receive({ type: "registerTab", version: 1, tabId: 5, url: "https://a/", title: "A" });
+    socket.receive({
+      type: "registerTab",
+      version: PROTOCOL_VERSION,
+      tabId: 5,
+      url: "https://a/",
+      title: "A",
+    });
     socket.receive({
       type: "event",
-      version: 1,
+      version: PROTOCOL_VERSION,
       tabId: 5,
       method: "Page.frameNavigated",
       params: { frame: { id: "f", url: "https://a/next" } },
     });
     socket.receive({
       type: "event",
-      version: 1,
+      version: PROTOCOL_VERSION,
       tabId: 5,
       method: "Page.frameNavigated",
       params: { frame: { id: "g", parentId: "f", url: "https://iframe/" } },
@@ -270,7 +306,7 @@ describe("after handshake", () => {
     const { socket, events } = await ready();
     socket.receive({
       type: "download",
-      version: 1,
+      version: PROTOCOL_VERSION,
       downloadId: 1,
       filename: "/tmp/a",
       url: "http://x/a",
@@ -283,13 +319,19 @@ describe("after handshake", () => {
 
   it("correlates command responses and rejects error responses with the extension's code", async () => {
     const { socket, peer } = await ready();
-    socket.receive({ type: "registerTab", version: 1, tabId: 6, url: "https://a/", title: "A" });
+    socket.receive({
+      type: "registerTab",
+      version: PROTOCOL_VERSION,
+      tabId: 6,
+      url: "https://a/",
+      title: "A",
+    });
     const ok = peer.sendCommand(6, "Runtime.evaluate", { expression: "1" }, 1000);
     const sent = socket.last() as { requestId: string; method: string };
     expect(sent.method).toBe("Runtime.evaluate");
     socket.receive({
       type: "response",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: sent.requestId,
       result: { value: 1 },
     });
@@ -299,7 +341,7 @@ describe("after handshake", () => {
     const badSent = socket.last() as { requestId: string };
     socket.receive({
       type: "error",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: badSent.requestId,
       error: { code: "UNSUPPORTED_CDP_METHOD", message: "no" },
     });
@@ -320,7 +362,7 @@ describe("after handshake", () => {
     expect(sent.type).toBe("openTab");
     socket.receive({
       type: "response",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: sent.requestId,
       result: { tabId: 12 },
     });
@@ -330,7 +372,7 @@ describe("after handshake", () => {
     const badSent = socket.last() as { requestId: string };
     socket.receive({
       type: "response",
-      version: 1,
+      version: PROTOCOL_VERSION,
       requestId: badSent.requestId,
       result: { tabId: "x" },
     });
@@ -339,8 +381,20 @@ describe("after handshake", () => {
 
   it("failPendingForTab only fails that tab's requests", async () => {
     const { socket, peer } = await ready();
-    socket.receive({ type: "registerTab", version: 1, tabId: 1, url: "https://a/", title: "A" });
-    socket.receive({ type: "registerTab", version: 1, tabId: 2, url: "https://b/", title: "B" });
+    socket.receive({
+      type: "registerTab",
+      version: PROTOCOL_VERSION,
+      tabId: 1,
+      url: "https://a/",
+      title: "A",
+    });
+    socket.receive({
+      type: "registerTab",
+      version: PROTOCOL_VERSION,
+      tabId: 2,
+      url: "https://b/",
+      title: "B",
+    });
     const one = peer.sendCommand(1, "Runtime.evaluate", {}, 1000);
     const two = peer.sendCommand(2, "Runtime.evaluate", {}, 1000);
     const oneFailed = expect(one).rejects.toMatchObject({ code: "DIALOG_OPEN" });
@@ -348,13 +402,24 @@ describe("after handshake", () => {
     await oneFailed;
     expect(peer.pendingRequestCount).toBe(1);
     const sent = socket.last() as { requestId: string };
-    socket.receive({ type: "response", version: 1, requestId: sent.requestId, result: 1 });
+    socket.receive({
+      type: "response",
+      version: PROTOCOL_VERSION,
+      requestId: sent.requestId,
+      result: 1,
+    });
     await expect(two).resolves.toBe(1);
   });
 
   it("on socket close rejects pending requests, removes tabs, and reports close", async () => {
     const { socket, peer, events } = await ready();
-    socket.receive({ type: "registerTab", version: 1, tabId: 1, url: "https://a/", title: "A" });
+    socket.receive({
+      type: "registerTab",
+      version: PROTOCOL_VERSION,
+      tabId: 1,
+      url: "https://a/",
+      title: "A",
+    });
     const pending = peer.sendCommand(1, "Runtime.evaluate", {}, 1000);
     const failed = expect(pending).rejects.toMatchObject({ code: "BRIDGE_DISCONNECTED" });
     socket.close();
