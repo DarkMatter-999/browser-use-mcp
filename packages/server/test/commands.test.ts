@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DaemonClient } from "../src/client/daemon-client";
-import { resolvePaths } from "../src/config";
+import { resolveBrowserConfig, resolvePaths } from "../src/config";
 import { type Io, run } from "../src/main";
 import { startInProcessDaemon } from "./helpers/in-process-daemon";
 
@@ -140,21 +140,18 @@ describe("doctor", () => {
   });
 
   it("checks browser discovery for headless mode without warning about the unused extension", async () => {
+    const env = {
+      BROWSER_USE_MODE: "headless",
+      BROWSER_USE_CHROME_PATH: "/missing/browser-use-test-browser",
+    };
     daemon = await startInProcessDaemon("1.0.0", {
       backendKind: "headless",
-      browserConfig: {
-        mode: "headless",
-        profile: "default",
-        executablePath: "/missing/browser-use-test-browser",
-      },
+      browserConfig: resolveBrowserConfig(env),
     });
     const c = capture();
     const code = await run(["doctor"], c.io, {
       ...deps(daemon),
-      env: {
-        BROWSER_USE_MODE: "headless",
-        BROWSER_USE_CHROME_PATH: "/missing/browser-use-test-browser",
-      },
+      env,
     });
 
     expect(c.text()).toMatch(/fail\s+browser/);

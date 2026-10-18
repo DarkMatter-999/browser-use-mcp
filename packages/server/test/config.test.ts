@@ -70,11 +70,14 @@ describe("resolveBrowserConfig", () => {
 
   it("treats empty settings as defaults and exposes an explicit executable override", () => {
     expect(
-      resolveBrowserConfig({
-        BROWSER_USE_MODE: "",
-        BROWSER_USE_PROFILE: "",
-        BROWSER_USE_CHROME_PATH: "/usr/bin/chromium",
-      }),
+      resolveBrowserConfig(
+        {
+          BROWSER_USE_MODE: "",
+          BROWSER_USE_PROFILE: "",
+          BROWSER_USE_CHROME_PATH: "/usr/bin/chromium",
+        },
+        "linux",
+      ),
     ).toEqual({
       mode: "extension",
       profile: "default",

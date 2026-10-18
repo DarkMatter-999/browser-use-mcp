@@ -14,14 +14,16 @@ describe("prepareProfileDirectory", () => {
     await Promise.all(homes.splice(0).map((home) => rm(home, { recursive: true, force: true })));
   });
 
-  it("creates and restricts a new persistent profile directory", async () => {
+  it("creates a persistent profile directory and applies private mode on POSIX", async () => {
     const home = await mkdtemp(join(tmpdir(), "bu-profile-"));
     homes.push(home);
     const profile = join(home, "profile");
 
-    await prepareProfileDirectory(profile, "linux");
+    await prepareProfileDirectory(profile);
 
-    expect((await lstat(profile)).mode & 0o777).toBe(0o700);
+    const info = await lstat(profile);
+    expect(info.isDirectory()).toBe(true);
+    if (process.platform !== "win32") expect(info.mode & 0o777).toBe(0o700);
   });
 
   it("rejects a symlink instead of chmodding or launching through its target", async () => {
